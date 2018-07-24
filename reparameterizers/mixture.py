@@ -8,9 +8,9 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 
 from helpers.utils import float_type, ones_like
-from models.reparameterizers.beta import Beta
-from models.reparameterizers.gumbel import GumbelSoftmax
-from models.reparameterizers.isotropic_gaussian import IsotropicGaussian
+from .beta import Beta
+from .gumbel import GumbelSoftmax
+from .isotropic_gaussian import IsotropicGaussian
 
 
 class Mixture(nn.Module):
