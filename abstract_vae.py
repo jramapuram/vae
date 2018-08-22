@@ -6,13 +6,49 @@ import torch.nn as nn
 from torch.autograd import Variable
 from collections import OrderedDict, Counter
 
-from helpers.utils import float_type
+
+from .pixelcnn import PixelCNN
+
+from helpers.utils import float_type, zeros
 from helpers.layers import View, flatten_layers, Identity, \
     build_gated_conv_encoder, build_conv_encoder, build_dense_encoder, build_gated_dense_encoder, \
     build_gated_conv_decoder, build_conv_decoder, build_dense_decoder, build_gated_dense_decoder, \
     build_relational_conv_encoder, build_pixelcnn_decoder, add_normalization, str_to_activ_module
 from helpers.distributions import nll_activation as nll_activation_fn
 from helpers.distributions import nll as nll_fn
+
+
+class VarianceProjector(nn.Module):
+    ''' simple helper to project to 2 * chans if we have variance;
+        or do nothing otherwise :) '''
+    def __init__(self, output_shape, activation_fn, config):
+        super(VarianceProjector, self).__init__()
+        chans = output_shape[0]
+
+        # build the sequential layer
+        if config['nll_type'] == 'gaussian' or config['nll_type'] == 'clamp':
+            if config['layer_type'] == 'conv':
+                self.decoder_projector = nn.Sequential(
+                    #TODO: caused error with groupnorm w/ 32
+                    #add_normalization(Identity(), config['normalization'], 2, self.chans, num_groups=32),
+                    activation_fn(),
+                    nn.ConvTranspose2d(chans, chans*2, 1, stride=1, bias=False)
+                )
+            else: # dense projector
+                input_flat = int(np.prod(output_shape))
+                self.decoder_projector = nn.Sequential(
+                    View([-1, input_flat]),
+                    add_normalization(Identity(), config['normalization'], 1, input_flat),
+                    activation_fn(),
+                    nn.Linear(input_flat, input_flat*2, bias=True),
+                    View([-1, chans*2, *output_shape[1:]])
+                )
+
+    def forward(self, x):
+        if hasattr(self, 'decoder_projector'):
+            return self.decoder_projector(x)
+
+        return x
 
 
 class AbstractVAE(nn.Module):
@@ -133,33 +169,36 @@ class AbstractVAE(nn.Module):
         if self.config['layer_type'] == 'conv':
             conv_builder = build_gated_conv_decoder \
                            if self.config['disable_gated'] is False else build_conv_decoder
-            decoder = nn.Sequential(
-                conv_builder(input_size=input_size,
-                             output_shape=self.input_shape,
-                             filter_depth=self.config['filter_depth'],
-                             activation_fn=self.activation_fn,
-                             normalization_str=self.config['normalization'],
-                             reupsample=reupsample)
-            )
-            if self.config['use_pixel_cnn_decoder']:
-                print("adding pixel CNN decoder...")
-                decoder = nn.Sequential(
-                    decoder,
-                    build_pixelcnn_decoder(input_size=self.chans,
-                                           output_shape=self.input_shape,
-                                           normalization_str=self.config['normalization'])
-                )
-
+            decoder = conv_builder(input_size=input_size,
+                                   output_shape=self.input_shape,
+                                   filter_depth=self.config['filter_depth'],
+                                   activation_fn=self.activation_fn,
+                                   normalization_str=self.config['normalization'],
+                                   reupsample=reupsample)
         elif self.config['layer_type'] == 'dense':
             dense_builder = build_gated_dense_decoder \
                 if self.config['disable_gated'] is False else build_dense_decoder
-
             decoder = dense_builder(input_shape=input_size,
                                     output_shape=self.input_shape,
                                     activation_fn=self.activation_fn,
                                     normalization_str=self.config['normalization'])
         else:
             raise Exception("unknown layer type requested")
+
+        if self.config['use_pixel_cnn_decoder']:
+            print("adding pixel CNN decoder...")
+            chan_mult = 1 if self.config['nll_type'] == 'bernoulli' else 2
+            input_shape = [chan_mult * self.chans] + self.input_shape[1:]
+            decoder = nn.Sequential(
+                decoder,
+                PixelCNN(self.chans)
+            )
+
+        # add the variance projector (if we are in that case for the NLL)
+        decoder = nn.Sequential(
+            decoder,
+            VarianceProjector(self.input_shape, self.activation_fn, self.config)
+        )
 
         if self.config['ngpu'] > 1:
             decoder = nn.DataParallel(decoder)
@@ -168,37 +207,6 @@ class AbstractVAE(nn.Module):
             decoder = decoder.cuda()
 
         return decoder
-
-    def _project_decoder_for_variance(self, logits):
-        ''' if we have a nll with variance
-            then project it to the required dimensions '''
-        if self.config['nll_type'] == 'gaussian' \
-           or self.config['nll_type'] == 'clamp':
-            if not hasattr(self, 'decoder_projector'):
-                if self.config['layer_type'] == 'conv':
-                    self.decoder_projector = nn.Sequential(
-                        #TODO: caused error with groupnorm w/ 32 
-                        #add_normalization(Identity(), self.config['normalization'], 2, self.chans, num_groups=32),
-                        self.activation_fn(),
-                        nn.ConvTranspose2d(self.chans, self.chans*2, 1, stride=1, bias=False)
-                    )
-                else:
-                    input_flat = int(np.prod(self.input_shape))
-                    self.decoder_projector = nn.Sequential(
-                        View([-1, input_flat]),
-                        add_normalization(Identity(), self.config['normalization'], 1, input_flat),
-                        self.activation_fn(),
-                        nn.Linear(input_flat, input_flat*2, bias=True),
-                        View([-1, self.chans*2, *self.input_shape[1:]])
-                    )
-
-                if self.config['cuda']:
-                    self.decoder_projector.cuda()
-
-            return self.decoder_projector(logits)
-
-        # bernoulli reconstruction
-        return logits
 
     def compile_full_model(self):
         ''' takes all the submodules and module-lists
@@ -249,6 +257,10 @@ class AbstractVAE(nn.Module):
     def loss_function(self, recon_x, x, params, mut_info=None):
         # elbo = -log_likelihood + latent_kl
         # cost = elbo + consistency_kl - self.mutual_info_reg * mutual_info_regularizer
+        assert x.shape == recon_x.shape, "incompatible sizing for reconstruction {} vs. true data {}".format(
+            list(recon_x.shape),
+            list(x.shape)
+        )
         nll = nll_fn(x, recon_x, self.config['nll_type'])
         kld = self.config['kl_reg'] * self.kld(params)
         elbo = nll + kld

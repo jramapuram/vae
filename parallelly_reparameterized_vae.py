@@ -70,11 +70,9 @@ class ParallellyReparameterizedVAE(AbstractVAE):
 
         return reparam_scalar_map
 
-
     def decode(self, z):
         '''returns logits '''
-        logits = self.decoder(z.contiguous())
-        return self._project_decoder_for_variance(logits)
+        return self.decoder(z.contiguous())
 
     def posterior(self, x):
         z_logits = self.encode(x)

@@ -149,7 +149,7 @@ class SequentiallyReparameterizedVAE(AbstractVAE):
 
     def decode(self, z):
         '''returns logits '''
-        return self.decoder(features.contiguous())
+        return self.decoder(z.contiguous())
 
     def posterior(self, x):
         ''' helper that does encode --> reparameterize '''

@@ -158,11 +158,14 @@ class VRNN(AbstractVAE):
         elif self.config['reparam_type'] == "beta":
             print("using beta reparameterizer")
             self.reparameterizer = Beta(self.config)
-        elif self.config['reparam_type'] == "mixture":
-            print("using mixture reparameterizer")
+        elif "mixture" in self.config['reparam_type']:
+            print("using mixture reparameterizer with {} + discrete".format(
+                'beta' if 'beta' in self.config['reparam_type'] else 'isotropic_gaussian'
+            ))
             self.reparameterizer = Mixture(num_discrete=self.config['discrete_size'],
                                            num_continuous=self.config['continuous_size'],
-                                           config=self.config)
+                                           config=self.config,
+                                           is_beta='beta' in self.config['reparam_type'])
         else:
             raise Exception("unknown reparameterization type")
 
@@ -250,22 +253,11 @@ class VRNN(AbstractVAE):
                                  rnn=self._lazy_rnn_lambda,
                                  cuda=self.config['cuda'])
 
-        # This needs to be done, else weightnorm throws a random error
-        # if self.config['cuda']:
-        #     modules = [self.phi_x, self.phi_z,
-        #                self.enc, self.prior, self.dec]
-        #     for i in range(len(modules)):
-        #         modules[i] = modules[i].cuda()
-        #         if self.config['ngpu'] > 1:
-        #             modules[i] = nn.DataParallel(modules[i])
-
-        # initialize our weights
-        # self = init_weights(self)
-
     def get_name(self):
-        if self.config['reparam_type'] == "mixture":
-            reparam_str = "mixturecat{}gauss{}_".format(
+        if "mixture" in self.config['reparam_type']:
+            reparam_str = "mixturecat{}{}{}_".format(
                 str(self.config['discrete_size']),
+                'beta' if 'beta' in self.config['reparam_type'] else 'gauss',
                 str(self.config['continuous_size'])
             )
         elif self.config['reparam_type'] == "isotropic_gaussian" or self.config['reparam_type'] == "beta":
@@ -314,18 +306,34 @@ class VRNN(AbstractVAE):
 
         return rnn.cuda() if self.config['cuda'] else rnn
 
+    def _clamp_variance(self, logits):
+        ''' clamp the variance when using a gaussian dist '''
+        if self.config['reparam_type'] == 'isotropic_gaussian':
+            feat_size = logits.size(-1)
+            return torch.cat(
+                [logits[:, 0:feat_size//2],
+                 F.sigmoid(logits[:, feat_size//2:])],
+                -1)
+        elif self.config['reparam_type'] == 'mixture':
+            feat_size = self.reparameterizer.num_continuous_input
+            return torch.cat(
+                [logits[:, 0:feat_size//2],                    # mean
+                 F.sigmoid(logits[:, feat_size//2:feat_size]), # clamped var
+                 logits[:, feat_size:]],                       # discrete
+                -1)
+        else:
+            return logits
+
     def reparameterize(self, logits_map):
         '''reparameterize the encoder output and the prior'''
-        nan_check_and_break(logits_map['encoder_logits'], "enc_logits")
-        nan_check_and_break(logits_map['prior_logits'], "prior_logits")
+        # nan_check_and_break(logits_map['encoder_logits'], "enc_logits")
+        # nan_check_and_break(logits_map['prior_logits'], "prior_logits")
         z_enc_t, params_enc_t = self.reparameterizer(logits_map['encoder_logits'])
 
-        # XXX: hardcode softplus on prior logits std-dev
-        feat_size = logits_map['prior_logits'].size(-1)
-        logits_map['prior_logits'] = torch.cat(
-            [logits_map['prior_logits'][:, 0:feat_size//2],
-            F.sigmoid(logits_map['prior_logits'][:, feat_size//2:])],
-        -1)
+        # XXX: clamp the variance of gaussian priors to not explode
+        logits_map['prior_logits'] = self._clamp_variance(logits_map['prior_logits'])
+
+        # reparamterize the prior distribution
         z_prior_t, params_prior_t = self.reparameterizer(logits_map['prior_logits'])
 
         z = {  # reparameterization
@@ -341,15 +349,15 @@ class VRNN(AbstractVAE):
         return z, params
 
     def decode(self, z_t, produce_output=False, reset_state=False):
-        # grab state from RNN
+        # grab state from RNN, TODO: evaluate recovery methods below
         # final_state = self.memory.get_repackaged_state()[0]
         final_state = torch.mean(self.memory.get_state()[0], 0)
         # final_state = self.memory.get_output().squeeze()
-        nan_check_and_break(final_state, "final_rnn_output[decode]")
+        # nan_check_and_break(final_state, "final_rnn_output[decode]")
 
         # feature transform for z_t
         phi_z_t = self.phi_z(z_t['posterior'])
-        nan_check_and_break(phi_z_t, "phi_z_t")
+        # nan_check_and_break(phi_z_t, "phi_z_t")
 
         # concat and run through RNN to update state
         input_t = torch.cat([z_t['x_features'], phi_z_t], -1).unsqueeze(0)
@@ -362,7 +370,6 @@ class VRNN(AbstractVAE):
                 [phi_z_t, final_state], -1
             )#.transpose(1, 0).squeeze()
             dec_t = self.dec(dec_input_t)
-            dec_t = self._project_decoder_for_variance(dec_t)
 
         return dec_t
 
@@ -382,7 +389,7 @@ class VRNN(AbstractVAE):
             phi_x_i = self.phi_x_i[i](x_item)
             phi_x_t = torch.cat([phi_x_t, phi_x_i], -1)
 
-        nan_check_and_break(phi_x_t, "phi_x_t")
+        # nan_check_and_break(phi_x_t, "phi_x_t")
         return phi_x_t
 
     def _lazy_build_encoder(self, input_size):
@@ -396,12 +403,12 @@ class VRNN(AbstractVAE):
         return self.enc.cuda() if self.config['cuda'] else self.enc
 
     def encode(self, x, *xargs):
-        # get the memory trace
+        # get the memory trace, TODO: evaluate different recovery methods below
         batch_size = x.size(0)
         final_state = torch.mean(self.memory.get_state()[0], 0)
         #final_state = self.memory.get_output().squeeze()
         #final_state = self.memory.get_repackaged_state()[0]
-        nan_check_and_break(final_state, "final_rnn_output")
+        # nan_check_and_break(final_state, "final_rnn_output")
 
         # extract input data features
         phi_x_t = self._extract_features(x, *xargs)
@@ -412,17 +419,11 @@ class VRNN(AbstractVAE):
             [phi_x_t, final_state], -1
         )#.transpose(1, 0).squeeze().contiguous()
         enc_t = self._lazy_build_encoder(enc_input_t.size(-1))(enc_input_t)
-        nan_check_and_break(enc_t, "enc_t")
+        # nan_check_and_break(enc_t, "enc_t")
 
         # prior projection
         prior_t = self.prior(final_state.transpose(1, 0).contiguous())# + eps_fn(self.config['cuda']))
-        nan_check_and_break(prior_t, "priot_t")
-
-        # enc_t = self.enc(torch.cat([phi_x_t, final_state], -1).contiguous())
-        # nan_check_and_break(enc_t, "enc_t")
-        # prior_t = self.prior(final_state)
         # nan_check_and_break(prior_t, "priot_t")
-
 
         return {
             'encoder_logits': enc_t,
@@ -448,12 +449,6 @@ class VRNN(AbstractVAE):
         logits_map = self.encode(*x_args)
         return self.reparameterize(logits_map)
 
-    # def kld(self, dist_list):
-    #     ''' KL divergence between dist_a and prior '''
-    #     reparams = [self.reparameterizer.kl(kl['posterior'], kl['prior']).unsqueeze(0)
-    #                 for kl in dist_list]
-    #     return torch.cat(reparams, 0)
-
     def _ensure_same_size(self, prediction_list, target_list):
         ''' helper to ensure that image sizes in both lists match '''
         assert len(prediction_list) == len(target_list), "#preds[{}] != #targets[{}]".format(
@@ -478,12 +473,6 @@ class VRNN(AbstractVAE):
         ''' KL divergence between dist_a and prior as well as constrain prior to hyper-prior'''
         return self.reparameterizer.kl(dist['posterior'], dist['prior'])  # \
              # + self.reparameterizer.kl(dist['prior']) / self.config['max_time_steps']
-
-    # def nll(self, prediction_list, target_list):
-    #     prediction_list, target_list = self._ensure_same_size(prediction_list, target_list)
-    #     nll = [nll_fn(targets, predictions, self.config['nll_type']).unsqueeze(0)
-    #            for targets, predictions in zip(target_list, prediction_list)]
-    #     return torch.cat(nll, 0)
 
     def mut_info(self, dist_params_container):
         ''' helper to get mutual info '''
@@ -529,46 +518,3 @@ class VRNN(AbstractVAE):
             loss_aggregate_map = self._add_loss_map(loss_t, loss_aggregate_map)
 
         return self._mean_map(loss_aggregate_map)
-
-    # def loss_function(self, recon_x, x, params_container):
-    #     # elbo = -log_likelihood + latent_kl
-    #     # cost = elbo + consistency_kl - self.mutual_info_reg * mutual_info_regularizer
-    #     nll = self.nll(recon_x, x) # multiply by self.config['max_time_steps']?
-    #     nan_check_and_break(nll, "nll")
-
-    #     kld = self.config['kl_reg'] * self.kld(params_container)
-    #     nan_check_and_break(kld, "kld")
-
-    #     #elbo = torch.sum(nll + kld, 0)
-    #     elbo = torch.mean(nll + kld, 0)
-
-    #     # tabulate mutual information
-    #     mut_info = self.mut_info(params_container)
-
-    #     # handle the mutual information term
-    #     if mut_info is None:
-    #         mut_info = same_type(self.config['half'], self.config['cuda'])(
-    #             x[0].size(0)
-    #         ).zero_().requires_grad_()
-    #     else:
-    #         # Clamping strategies
-    #         mut_clamp_strategy_map = {
-    #             'none': lambda mut_info: mut_info,
-    #             'norm': lambda mut_info: mut_info / torch.norm(mut_info, p=2),
-    #             'clamp': lambda mut_info: torch.clamp(mut_info,
-    #                                                   min=-self.config['mut_clamp_value'],
-    #                                                   max=self.config['mut_clamp_value'])
-    #         }
-    #         mut_info = mut_clamp_strategy_map[self.config['mut_clamp_strategy'].strip().lower()](mut_info)
-
-    #     nan_check_and_break(mut_info, "mut_info")
-    #     loss = elbo - mut_info
-    #     nan_check_and_break(loss, "vrnn_loss")
-    #     return {
-    #         'loss': loss,
-    #         'loss_mean': torch.mean(loss),
-    #         'elbo_mean': torch.mean(elbo),
-    #         'nll_mean': torch.mean(nll),
-    #         'kld_mean': torch.mean(kld),
-    #         'mut_info_mean': torch.mean(mut_info)
-    #     }

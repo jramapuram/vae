@@ -83,18 +83,6 @@ class IsotropicGaussian(nn.Module):
             D.Normal(prior['gaussian']['mu'], prior['gaussian']['logvar'])
         ), -1)
 
-    # def kl(self, dist_a, prior=None):
-    #     if prior == None: # use default prior
-    #         return IsotropicGaussian._kld_gaussian_N_0_1(
-    #             F.sigmoid(dist_a['gaussian']['mu']), F.softplus(dist_a['gaussian']['logvar'])
-    #         )
-
-    #     # we have two distributions provided (eg: VRNN)
-    #     return D.kl_divergence(
-    #         D.Normal(F.sigmoid(dist_a['gaussian']['mu']), F.softplus(dist_a['gaussian']['logvar'])),
-    #         D.Normal(F.sigmoid(prior['gaussian']['mu']), F.softplus(prior['gaussian']['logvar']))
-    #     )
-
     def log_likelihood(self, z, params):
         return D.Normal(params['gaussian']['mu'],
                         params['gaussian']['logvar']).log_prob(z)

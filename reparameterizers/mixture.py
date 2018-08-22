@@ -14,7 +14,7 @@ from .isotropic_gaussian import IsotropicGaussian
 
 
 class Mixture(nn.Module):
-    ''' gaussian + discrete reparaterization '''
+    ''' continuous + discrete reparaterization '''
     def __init__(self, num_discrete, num_continuous, config, is_beta=False):
         super(Mixture, self).__init__()
         self.config = config
@@ -22,7 +22,7 @@ class Mixture(nn.Module):
         self.num_discrete_input = num_discrete
         self.num_continuous_input = num_continuous
 
-        # setup the gaussian & discrete reparameterizer
+        # setup the continuous & discrete reparameterizer
         self.continuous = IsotropicGaussian(config) if not is_beta else Beta(config)
         self.discrete = GumbelSoftmax(config)
 
@@ -45,22 +45,25 @@ class Mixture(nn.Module):
         return torch.cat([cont, disc], 1)
 
     def reparmeterize(self, logits):
-        gaussian_logits = logits[:, 0:self.num_continuous_input]
+        continuous_logits = logits[:, 0:self.num_continuous_input]
         discrete_logits = logits[:, self.num_continuous_input:]
 
-        gaussian_reparam, gauss_params = self.continuous(gaussian_logits)
+        continuous_reparam, continuous_params = self.continuous(continuous_logits)
         discrete_reparam, disc_params = self.discrete(discrete_logits)
-        merged = torch.cat([gaussian_reparam, discrete_reparam], -1)
+        merged = torch.cat([continuous_reparam, discrete_reparam], -1)
 
-        params = {'gaussian': gauss_params['gaussian'],
+        # use a separate key for gaussian or beta
+        continuous_value = continuous_params['gaussian'] if not self.is_beta else continuous_params['beta']
+        continuous_key = 'gaussian' if not self.is_beta else 'beta'
+        params = {continuous_key: continuous_value,
                   'discrete': disc_params['discrete'],
                   'z': merged}
         return merged, params
 
     def kl(self, dist_a, prior=None):
-        gauss_kl = self.continuous.kl(dist_a, prior)
+        continuous_kl = self.continuous.kl(dist_a, prior)
         disc_kl = self.discrete.kl(dist_a, prior)
-        return gauss_kl + disc_kl
+        return continuous_kl + disc_kl
 
     def forward(self, logits):
         return self.reparmeterize(logits)
