@@ -55,7 +55,7 @@ class GumbelSoftmax(nn.Module):
         z, z_hard = self.sample_gumbel(logits, self.tau,
                                        hard=True,
                                        dim=self.dim,
-                                       use_cuda=self.config['cuda'])
+                                       use_cuda=logits.is_cuda)
         return z.view(logits_shp), z_hard.view(logits_shp), log_q_z
 
     def mutual_info_analytic(self, params, eps=1e-9):
@@ -125,7 +125,7 @@ class GumbelSoftmax(nn.Module):
         return x.view_as(x)
 
     @staticmethod
-    def sample_gumbel(x, tau, hard=False, dim=-1, use_cuda=True):
+    def sample_gumbel(x, tau, hard=False, dim=-1, use_cuda=False):
         y = GumbelSoftmax._gumbel_softmax(x, tau, dim=dim, use_cuda=use_cuda)
 
         if hard:

@@ -51,28 +51,28 @@ class VRNNMemory(nn.Module):
     def clear(self):
         self.memory_buffer.clear()
 
-    def init_state(self, batch_size):
-        def _init(batch_size):
+    def init_state(self, batch_size, cuda=False):
+        def _init(batch_size, cuda):
             ''' return a single initialized state'''
             num_directions = 2 if self.bidirectional else 1
             if self.training and self.config['use_noisy_rnn_state']: # add some noise to initial state
                 # nn.init.xavier_uniform_(
-                return same_type(self.config['half'], self.config['cuda'])(
+                return same_type(self.config['half'], cuda)(
                     num_directions * self.n_layers, batch_size, self.h_dim
                 ).normal_(0, 0.01).requires_grad_()
 
             # return zeros for testing
-            return same_type(self.config['half'], self.config['cuda'])(
+            return same_type(self.config['half'], cuda)(
                 num_directions * self.n_layers, batch_size, self.h_dim
             ).zero_().requires_grad_()
 
         self.state = ( # LSTM state is (h, c)
-            _init(batch_size),
-            _init(batch_size)
+            _init(batch_size, cuda),
+            _init(batch_size, cuda)
         )
 
-    def init_output(self, batch_size, seqlen):
-        self.outputs = same_type(self.config['half'], self.config['cuda'])(
+    def init_output(self, batch_size, seqlen, cuda=False):
+        self.outputs = same_type(self.config['half'], cuda)(
             seqlen, batch_size, self.h_dim
         ).zero_().requires_grad_()
 
@@ -83,7 +83,7 @@ class VRNNMemory(nn.Module):
     def forward(self, input_t, reset_state=False):
         batch_size = input_t.size(0)
         if reset_state:
-            self.init_state(batch_size)
+            self.init_state(batch_size, input_t.is_cuda)
 
         input_t = input_t.contiguous()
 
@@ -203,8 +203,7 @@ class VRNN(AbstractVAE):
                 nn.SELU()
             )
 
-        return phi_x.cuda() if self.config['cuda'] else phi_x
-
+        return phi_x
 
     def _lazy_rnn_lambda(self, x, state,
                           model_type='lstm',
@@ -242,8 +241,8 @@ class VRNN(AbstractVAE):
                                          nlayers=2)
 
         # decoder
-        self.dec = self._build_decoder(input_size=self.latent_size*2,
-                                       reupsample=True)
+        self.decoder = self._build_decoder(input_size=self.latent_size*2,
+                                           reupsample=True)
 
         # memory module that contains the RNN or DNC
         self.memory = VRNNMemory(h_dim=self.latent_size,
@@ -252,6 +251,15 @@ class VRNN(AbstractVAE):
                                  config=self.config,
                                  rnn=self._lazy_rnn_lambda,
                                  cuda=self.config['cuda'])
+
+    def parallel(self):
+        self.phi_x = nn.DataParallel(self.phi_x)
+        self.phi_z = nn.DataParallel(self.phi_z)
+        self.prior = nn.DataParallel(self.prior)
+        #if self.config['use_pixel_cnn_decoder'] is False:
+        self.decoder = nn.DataParallel(self.decoder)
+
+        #self.memory.model = nn.DataParallel(self.memory.model)
 
     def get_name(self):
         if "mixture" in self.config['reparam_type']:
@@ -304,7 +312,7 @@ class VRNN(AbstractVAE):
         if self.config['cuda'] and not self.config['half']:
             rnn.flatten_parameters()
 
-        return rnn.cuda() if self.config['cuda'] else rnn
+        return rnn
 
     def _clamp_variance(self, logits):
         ''' clamp the variance when using a gaussian dist '''
@@ -369,7 +377,7 @@ class VRNN(AbstractVAE):
             dec_input_t = torch.cat(
                 [phi_z_t, final_state], -1
             )#.transpose(1, 0).squeeze()
-            dec_t = self.dec(dec_input_t)
+            dec_t = self.decoder(dec_input_t)
 
         return dec_t
 
@@ -394,13 +402,12 @@ class VRNN(AbstractVAE):
 
     def _lazy_build_encoder(self, input_size):
         ''' lazy build the encoder based on the input size'''
-        if not hasattr(self, 'enc'):
-            self.enc = build_dense_encoder(input_size, self.reparameterizer.input_size,
-                                           activation_fn=self.dense_activation_fn,
-                                           normalization_str=self.normalization,
-                                           nlayers=2)
-
-        return self.enc.cuda() if self.config['cuda'] else self.enc
+        if not hasattr(self, 'encoder'):
+            self.encoder = build_dense_encoder(input_size, self.reparameterizer.input_size,
+                                               activation_fn=self.dense_activation_fn,
+                                               normalization_str=self.normalization,
+                                               nlayers=2)
+        return self.encoder
 
     def encode(self, x, *xargs):
         # get the memory trace, TODO: evaluate different recovery methods below
@@ -416,13 +423,14 @@ class VRNN(AbstractVAE):
         # encoder projection; TODO: evaluate n_layer repeat logic below
         #phi_x_t_expanded = phi_x_t.unsqueeze(0).repeat(self.memory.n_layers, 1, 1)
         enc_input_t = torch.cat(
-            [phi_x_t, final_state], -1
+            [phi_x_t, final_state], dim=-1
         )#.transpose(1, 0).squeeze().contiguous()
         enc_t = self._lazy_build_encoder(enc_input_t.size(-1))(enc_input_t)
         # nan_check_and_break(enc_t, "enc_t")
 
         # prior projection
-        prior_t = self.prior(final_state.transpose(1, 0).contiguous())# + eps_fn(self.config['cuda']))
+        #prior_t = self.prior(final_state.transpose(1, 0).contiguous())# + eps_fn(self.config['cuda']))
+        prior_t = self.prior(final_state.contiguous())# + eps_fn(self.config['cuda']))
         # nan_check_and_break(prior_t, "priot_t")
 
         return {
@@ -437,7 +445,7 @@ class VRNN(AbstractVAE):
         samples = zeros([batch_size] + self.config['img_shp'],
                         cuda=self.config['cuda'])
 
-        self.memory.init_state()  # reset memory
+        self.memory.init_state(batch_size, cuda=self.config['cuda'])  # reset memory
         z_t, _ = self.posterior(samples)
         return self.nll_activation(self.decode(z_t))
 

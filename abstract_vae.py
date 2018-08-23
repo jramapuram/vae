@@ -7,7 +7,8 @@ from torch.autograd import Variable
 from collections import OrderedDict, Counter
 
 
-from .pixelcnn import PixelCNN
+#from .pixelcnn import PixelCNN
+from helpers.pixel_cnn.model import PixelCNN
 
 from helpers.utils import float_type, zeros
 from helpers.layers import View, flatten_layers, Identity, \
@@ -145,11 +146,11 @@ class AbstractVAE(nn.Module):
         else:
             raise Exception("unknown layer type requested")
 
-        if self.config['ngpu'] > 1:
-            encoder = nn.DataParallel(encoder)
+        # if self.config['ngpu'] > 1:
+        #     encoder = nn.DataParallel(encoder)
 
-        if self.config['cuda']:
-            encoder = encoder.cuda()
+        # if self.config['cuda']:
+        #     encoder = encoder.cuda()
 
         return encoder
 
@@ -187,26 +188,31 @@ class AbstractVAE(nn.Module):
 
         if self.config['use_pixel_cnn_decoder']:
             print("adding pixel CNN decoder...")
-            chan_mult = 1 if self.config['nll_type'] == 'bernoulli' else 2
-            input_shape = [chan_mult * self.chans] + self.input_shape[1:]
+            # chan_mult = 1 if self.config['nll_type'] == 'bernoulli' else 2
+            # input_shape = [chan_mult * self.chans] + self.input_shape[1:]
             decoder = nn.Sequential(
                 decoder,
-                PixelCNN(self.chans)
+                #PixelCNN(self.input_shape, self.config)
+                PixelCNN(input_channels=self.chans)
             )
 
         # add the variance projector (if we are in that case for the NLL)
         decoder = nn.Sequential(
             decoder,
-            VarianceProjector(self.input_shape, self.activation_fn, self.config)
+            #VarianceProjector(self.input_shape, self.activation_fn, self.config)
         )
 
-        if self.config['ngpu'] > 1:
-            decoder = nn.DataParallel(decoder)
+        # if self.config['ngpu'] > 1:
+        #     decoder = nn.DataParallel(decoder)
 
-        if self.config['cuda']:
-            decoder = decoder.cuda()
+        # if self.config['cuda']:
+        #     decoder = decoder.cuda()
 
         return decoder
+
+    def parallel(self):
+        self.encoder = nn.DataParallel(self.encoder)
+        self.decoder = nn.DataParallel(self.decoder)
 
     def compile_full_model(self):
         ''' takes all the submodules and module-lists
@@ -251,16 +257,28 @@ class AbstractVAE(nn.Module):
 
     def forward(self, x):
         ''' params is a map of the latent variable's parameters'''
+        if self.config['use_pixel_cnn_decoder']:
+            rescaling     = lambda x : (x - .5) * 2.
+            x = rescaling(x)
+
+        # encode to posterior and then decode
         z, params = self.posterior(x)
-        return self.decode(z), params
+        decoded = self.decode(z)
+
+        # and then tentatively invert for pixel_cnn
+        if self.config['use_pixel_cnn_decoder']:
+            rescaling_inv = lambda x : .5 * x  + .5
+            decoded = rescaling_inv(decoded)
+
+        return decoded , params
 
     def loss_function(self, recon_x, x, params, mut_info=None):
         # elbo = -log_likelihood + latent_kl
         # cost = elbo + consistency_kl - self.mutual_info_reg * mutual_info_regularizer
-        assert x.shape == recon_x.shape, "incompatible sizing for reconstruction {} vs. true data {}".format(
-            list(recon_x.shape),
-            list(x.shape)
-        )
+        # assert x.shape == recon_x.shape, "incompatible sizing for reconstruction {} vs. true data {}".format(
+        #     list(recon_x.shape),
+        #     list(x.shape)
+        # )
         nll = nll_fn(x, recon_x, self.config['nll_type'])
         kld = self.config['kl_reg'] * self.kld(params)
         elbo = nll + kld

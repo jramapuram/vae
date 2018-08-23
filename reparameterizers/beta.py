@@ -42,7 +42,7 @@ class Beta(nn.Module):
             # rsample is CPU only ¯\_(ツ)_/¯ , but ok
             # because it is outside the computational graph
             beta_cpu = D.Beta(conc1.cpu(), conc2.cpu()).rsample()
-            beta = beta_cpu.cuda() if self.config['cuda'] else beta_cpu
+            beta = beta_cpu.cuda() if conc1.is_cuda else beta_cpu
             # once we have GPU rsample just use the following:
             # beta = D.Beta(conc1, conc2).rsample()
             return beta, {'conc1': conc1, 'conc2': conc2}
