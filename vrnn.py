@@ -177,33 +177,12 @@ class VRNN(AbstractVAE):
         return self._lazy_build_phi_x(self.input_shape)
 
     def _lazy_build_phi_x(self, input_shape):
-        ''' simple helper to build the feature extractor for x
-            NOTE: Expects input_shape as [chan, xdim, ydim]'''
-        if self.config['layer_type'] == 'conv':    # build a conv encoder
-            conv_builder = build_gated_conv_encoder \
-                if self.config['disable_gated'] is False else build_conv_encoder
-            phi_x = nn.Sequential(
-                conv_builder(input_shape=[input_shape[0], -np.inf, -np.inf],  # ensures to use upsampler
-                             output_size=self.latent_size,
-                             filter_depth=self.config['filter_depth'],
-                             activation_fn=self.activation_fn,
-                             normalization_str=self.config['normalization']),
-                nn.SELU()
-            )
-        else:  # conv encoder
-            input_size = int(np.prod(input_shape))
-            dense_builder = build_gated_dense_encoder \
-                if self.config['disable_gated'] is False else build_dense_encoder
-            phi_x = nn.Sequential(
-                #nn.Upsample(size=(self.input_shape[1], self.input_shape[2]), mode='bilinear'),
-                dense_builder(input_size, self.latent_size,
-                              activation_fn=self.dense_activation_fn,
-                              normalization_str=self.normalization,
-                              nlayers=2),
-                nn.SELU()
-            )
-
-        return phi_x
+        return nn.Sequential(
+            self._get_encoder_net_map()(input_shape=input_shape,
+                                        output_size=self.latent_size,
+                                        activation_fn=self.activation_fn),
+            nn.SELU()
+        )
 
     def _lazy_rnn_lambda(self, x, state,
                           model_type='lstm',
@@ -358,9 +337,7 @@ class VRNN(AbstractVAE):
 
     def decode(self, z_t, produce_output=False, reset_state=False):
         # grab state from RNN, TODO: evaluate recovery methods below
-        # final_state = self.memory.get_repackaged_state()[0]
         final_state = torch.mean(self.memory.get_state()[0], 0)
-        # final_state = self.memory.get_output().squeeze()
         # nan_check_and_break(final_state, "final_rnn_output[decode]")
 
         # feature transform for z_t
@@ -374,9 +351,7 @@ class VRNN(AbstractVAE):
         # decode only if flag is set
         dec_t = None
         if produce_output:
-            dec_input_t = torch.cat(
-                [phi_z_t, final_state], -1
-            )#.transpose(1, 0).squeeze()
+            dec_input_t = torch.cat([phi_z_t, final_state], -1)
             dec_t = self.decoder(dec_input_t)
 
         return dec_t
@@ -413,24 +388,18 @@ class VRNN(AbstractVAE):
         # get the memory trace, TODO: evaluate different recovery methods below
         batch_size = x.size(0)
         final_state = torch.mean(self.memory.get_state()[0], 0)
-        #final_state = self.memory.get_output().squeeze()
-        #final_state = self.memory.get_repackaged_state()[0]
         # nan_check_and_break(final_state, "final_rnn_output")
 
         # extract input data features
         phi_x_t = self._extract_features(x, *xargs)
 
-        # encoder projection; TODO: evaluate n_layer repeat logic below
-        #phi_x_t_expanded = phi_x_t.unsqueeze(0).repeat(self.memory.n_layers, 1, 1)
-        enc_input_t = torch.cat(
-            [phi_x_t, final_state], dim=-1
-        )#.transpose(1, 0).squeeze().contiguous()
+        # encoder projection
+        enc_input_t = torch.cat([phi_x_t, final_state], dim=-1)
         enc_t = self._lazy_build_encoder(enc_input_t.size(-1))(enc_input_t)
         # nan_check_and_break(enc_t, "enc_t")
 
         # prior projection
-        #prior_t = self.prior(final_state.transpose(1, 0).contiguous())# + eps_fn(self.config['cuda']))
-        prior_t = self.prior(final_state.contiguous())# + eps_fn(self.config['cuda']))
+        prior_t = self.prior(final_state.contiguous())
         # nan_check_and_break(prior_t, "priot_t")
 
         return {
@@ -440,18 +409,82 @@ class VRNN(AbstractVAE):
         }
 
 
+    # def generate_synthetic_samples(self, batch_size, **kwargs):
+    #     ''' simply override VAE to init memory state first'''
+    #     return super(VRNN, self).generate_synthetic_samples(batch_size, **kwargs)
+
+    def _decode_pixelcnn_or_normal(self, dec_input_t):
+        ''' helper to decode using the pixel-cnn or normal decoder'''
+        if self.config['decoder_layer_type'] == "pixelcnn":
+            # hot-swap the non-pixel CNN for the decoder
+            full_decoder = self.decoder
+            trunc_decoder = self.decoder[0:-1]
+
+            # decode the synthetic samples using non-pCNN
+            decoded = trunc_decoder(dec_input_t)
+
+            # then decode with the pCNN
+            return self.generate_pixel_cnn(dec_input_t.size(0), decoded)
+
+        dec_logits_t = self.decoder(dec_input_t)
+        return self.nll_activation(dec_logits_t)
+
     def generate_synthetic_samples(self, batch_size, **kwargs):
-        assert 'seq_len' in kwargs, "VRNN needs seq_len passed into kwargs"
-        samples = zeros([batch_size] + self.config['img_shp'],
-                        cuda=self.config['cuda'])
+        if 'reset_state' in kwargs and kwargs['reset_state']:
+            self.memory.init_state(batch_size, cuda=self.config['cuda'])
 
-        self.memory.init_state(batch_size, cuda=self.config['cuda'])  # reset memory
-        z_t, _ = self.posterior(samples)
-        return self.nll_activation(self.decode(z_t))
+        # grab the final state
+        final_state = torch.mean(self.memory.get_state()[0], 0)
 
-    def generate(self, z_t, reset_state=False):
-        ''' reparameterizer for sequential is different '''
-        return self.decode(z_t, reset_state=reset_state)
+        # reparameterize the prior distribution
+        prior_t = self.prior(final_state.contiguous())
+        prior_t = self._clamp_variance(prior_t)
+        z_prior_t, params_prior_t = self.reparameterizer(prior_t)
+
+        # encode prior sample, this contrasts the decoder where
+        # the features are run through this network
+        phi_z_t = self.phi_z(z_prior_t)
+
+        # construct decoder inputs and process
+        dec_input_t = torch.cat([phi_z_t, final_state], -1)
+        dec_output_t = self._decode_pixelcnn_or_normal(dec_input_t)
+
+        # use the decoder output as features to update the RNN
+        phi_x_t = self.phi_x(dec_output_t)
+        input_t = torch.cat([phi_x_t, phi_z_t], -1).unsqueeze(0)
+        self.memory(input_t.contiguous(), reset_state=False)
+
+        # return the activated outputs
+        return dec_output_t
+
+
+    # def generate_synthetic_samples(self, batch_size, **kwargs):
+    #     self.memory.init_state(batch_size, cuda=self.config['cuda'])  # reset memory
+    #     z_samples = {
+    #         'posterior': self.reparameterizer.prior(
+    #             batch_size, scale_var=self.config['generative_scale_var'], **kwargs
+    #         ),
+    #         'prior': self.reparameterizer.prior(
+    #             batch_size, scale_var=self.config['generative_scale_var'], **kwargs
+    #         )
+    #     }
+
+    #     if self.config['decoder_layer_type'] == "pixelcnn":
+    #         # hot-swap the non-pixel CNN for the decoder
+    #         full_decoder = self.decoder
+    #         trunc_decoder = self.decoder[0:-1]
+    #         self.decoder = trunc_decoder
+
+    #         # decode the synthetic samples
+    #         decoded = self.decode(z_samples)
+
+    #         # swap back the decoder and run the pixelcnn
+    #         self.decoder = full_decoder
+    #         return self.generate_pixel_cnn(batch_size, decoded)
+
+    #     # in the normal case just decode and activate
+    #     return self.nll_activation(self.decode(z_samples))
+
 
     def posterior(self, *x_args):
         logits_map = self.encode(*x_args)

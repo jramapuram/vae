@@ -87,10 +87,6 @@ class ParallellyReparameterizedVAE(AbstractVAE):
             and lazy init's a dense projector'''
         return self.encoder(x)         # do the convolution
 
-    # def generate(self, z):
-    #     ''' reparameterizer for sequential is different '''
-    #     return self.decode(z)
-
     def kld(self, dist_a):
         ''' KL divergence between dist_a and prior '''
         return self.reparameterizer.kl(dist_a)

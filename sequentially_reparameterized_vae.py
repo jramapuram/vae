@@ -128,7 +128,7 @@ class SequentiallyReparameterizedVAE(AbstractVAE):
             setattr(self, name,
                     build_dense_encoder(input_size, output_size,
                                         nlayers=2, activation_fn=self.activation_fn,
-                                        normalization_str=self.config['normalization']))
+                                        normalization_str=self.config['dense_normalization']))
 
     def reparameterize(self, z):
         ''' reparameterize the latent logits appropriately '''
@@ -160,13 +160,6 @@ class SequentiallyReparameterizedVAE(AbstractVAE):
         ''' params is a map of the latent variable's parameters'''
         z, params_map = self.posterior(x)
         return self.decode(z), params_map
-
-    # def generate(self, z):
-    #     ''' given z_0 generate z_1, ... -> decode(z_last) '''
-    #     for reparameterizer in self.reparameterizers[1:]:
-    #         z, _ = reparameterizer(z)
-
-    #     return self.decode(z)
 
     def kld(self, dists):
         ''' does the KL divergence between the posterior and the prior '''

@@ -21,7 +21,7 @@ class Beta(nn.Module):
         assert self.config['continuous_size'] % 2 == 0
         self.output_size = self.config['continuous_size'] // 2
 
-    def prior(self, batch_size):
+    def prior(self, batch_size, **kwargs):
         ''' Kerman, J. (2011). Neutral noninformative and informative
         conjugate beta and gamma prior distributions. Electronic
         Journal of Statistics, 5, 1450-1470.'''

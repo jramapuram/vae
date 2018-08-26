@@ -20,7 +20,7 @@ class GumbelSoftmax(nn.Module):
         self.input_size = self.config['discrete_size']
         self.output_size = self.config['discrete_size']
 
-    def prior(self, batch_size):
+    def prior(self, batch_size, **kwargs):
         uniform_probs = float_type(self.config['cuda'])(1, self.output_size[-1]).zero_()
         uniform_probs += 1.0 / self.output_size
         cat = torch.distributions.Categorical(uniform_probs)

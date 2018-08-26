@@ -19,11 +19,12 @@ class IsotropicGaussian(nn.Module):
         assert self.config['continuous_size'] % 2 == 0
         self.output_size = self.config['continuous_size'] // 2
 
-    def prior(self, batch_size):
+    def prior(self, batch_size, **kwargs):
+        scale_var = 1.0 if 'scale_var' not in kwargs else kwargs['scale_var']
         return Variable(
             same_type(self.config['half'], self.config['cuda'])(
                 batch_size, self.output_size
-            ).normal_()
+            ).normal_(mean=0, std=scale_var)
         )
 
     def _reparametrize_gaussian(self, mu, logvar):
