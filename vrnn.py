@@ -235,9 +235,15 @@ class VRNN(AbstractVAE):
         self.phi_x = nn.DataParallel(self.phi_x)
         self.phi_z = nn.DataParallel(self.phi_z)
         self.prior = nn.DataParallel(self.prior)
-        #if self.config['use_pixel_cnn_decoder'] is False:
-        self.decoder = nn.DataParallel(self.decoder)
+        if self.config['decoder_layer_type'] == "pixelcnn":
+            self.decoder = nn.Sequential(
+                nn.DataParallel(self.decoder[0:-1]),
+                nn.DataParallel(self.decoder[-1])
+            )
+        else:
+            self.decoder = nn.DataParallel(self.decoder)
 
+        # TODO: try to get this working
         #self.memory.model = nn.DataParallel(self.memory.model)
 
     def get_name(self):
