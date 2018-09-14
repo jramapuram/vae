@@ -7,15 +7,10 @@ import torch.nn as nn
 from torch.autograd import Variable
 from collections import OrderedDict, Counter
 
-
-#from .pixelcnn import PixelCNN
 from helpers.pixel_cnn.model import PixelCNN
-
-from helpers.utils import float_type, zeros
+from helpers.utils import float_type, zeros, nan_check_and_break
 from helpers.layers import View, flatten_layers, Identity, \
-    build_gated_conv_encoder, build_conv_encoder, build_dense_encoder, build_gated_dense_encoder, \
-    build_gated_conv_decoder, build_conv_decoder, build_dense_decoder, build_gated_dense_decoder, \
-    build_relational_conv_encoder, build_pixelcnn_decoder, add_normalization, str_to_activ_module
+    build_pixelcnn_decoder, add_normalization, str_to_activ_module, get_decoder, get_encoder
 from helpers.distributions import nll_activation as nll_activation_fn
 from helpers.distributions import nll as nll_fn
 from helpers.distributions import nll_has_variance
@@ -74,11 +69,13 @@ class AbstractVAE(nn.Module):
         ''' helper to get the name of the model '''
         es_str = "es" + str(int(self.config['early_stop'])) if self.config['early_stop'] \
                  else "epochs" + str(self.config['epochs'])
-        full_hash_str = """_{}{}_{}act{}_klr{}_gsv{}_mcig{}_mcs{}{}_input{}_batch{}_mut{}d{}c_filter{}_nll{}_lr{}_{}_{}_ngpu{}""".format(
+        full_hash_str = """_{}{}_{}act{}_cr{}_dr{}_klr{}_gsv{}_mcig{}_mcs{}{}_input{}_batch{}_mut{}d{}c_filter{}_nll{}_lr{}_{}_{}_ngpu{}""".format(
             str(self.config['encoder_layer_type']),
             str(self.config['decoder_layer_type']),
             reparam_str,
             str(self.activation_fn.__name__),
+            self.config['conv_normalization'],
+            self.config['dense_normalization'],
             str(self.config['kl_reg']),
             str(self.config['generative_scale_var']),
             str(int(self.config['monte_carlo_infogain'])),
@@ -98,6 +95,7 @@ class AbstractVAE(nn.Module):
         full_hash_str = full_hash_str.strip().lower().replace('[', '')  \
                                                      .replace(']', '')  \
                                                      .replace(' ', '')  \
+                                                     .replace('\n', '') \
                                                      .replace('{', '') \
                                                      .replace('}', '') \
                                                      .replace(',', '_') \
@@ -123,40 +121,10 @@ class AbstractVAE(nn.Module):
 
         return task_str
 
-    def _get_encoder_net_map(self):
-        ''' helper to return the correct encoder function'''
-        net_map = {
-            'relational': build_relational_conv_encoder,
-            'conv': {
-                # True for gated, False for non-gated
-                True: functools.partial(build_gated_conv_encoder,
-                                        filter_depth=self.config['filter_depth'],
-                                        normalization_str=self.config['conv_normalization']),
-                False: functools.partial(build_conv_encoder,
-                                         filter_depth=self.config['filter_depth'],
-                                         normalization_str=self.config['conv_normalization'])
-            },
-            'dense': {
-                # True for gated, False for non-gated
-                True: functools.partial(build_gated_dense_encoder,
-                                        normalization_str=self.config['dense_normalization']),
-                False: functools.partial(build_dense_encoder,
-                                         normalization_str=self.config['dense_normalization'])
-
-            }
-        }
-
-        fn = net_map[self.config['encoder_layer_type']][not self.config['disable_gated']]
-        print("using {} {} for encoder".format(
-            "gated" if not self.config['disable_gated'] else "standard",
-            self.config['encoder_layer_type']
-        ))
-        return fn
-
     def build_encoder(self):
-        return self._get_encoder_net_map()(input_shape=self.input_shape,
-                                           output_size=self.reparameterizer.input_size,
-                                           activation_fn=self.activation_fn)
+        return get_encoder(self.config)(input_shape=self.input_shape,
+                                        output_size=self.reparameterizer.input_size,
+                                        activation_fn=self.activation_fn)
 
     def lazy_build_decoder(self, input_size):
         ''' lazily build the decoder network '''
@@ -169,57 +137,27 @@ class AbstractVAE(nn.Module):
         ''' helper function to build convolutional or dense decoder'''
         return self._build_decoder(self.reparameterizer.output_size)
 
-    def _get_decoder_net_map(self, reupsample=True):
-        ''' helper to return the correct decoder function'''
-        net_map = {
-            'conv': {
-                # True for gated, False for non-gated
-                True: functools.partial(build_gated_conv_decoder,
-                                        filter_depth=self.config['filter_depth'],
-                                        reupsample=reupsample,
-                                        normalization_str=self.config['conv_normalization']),
-                False: functools.partial(build_conv_decoder,
-                                         filter_depth=self.config['filter_depth'],
-                                         reupsample=reupsample,
-                                         normalization_str=self.config['conv_normalization'])
-            },
-            'dense': {
-                # True for gated, False for non-gated
-                True: functools.partial(build_gated_dense_decoder,
-                                        normalization_str=self.config['dense_normalization']),
-                False: functools.partial(build_dense_decoder,
-                                         normalization_str=self.config['dense_normalization'])
-            }
-        }
-
-        # sanity check
+    def _build_decoder(self, input_size, reupsample=True):
+        # sanity check, pcnn only works with discrete mixture logistic
         if self.config['decoder_layer_type'] == "pixelcnn":
             assert self.config['nll_type'] == "disc_mix_logistic", \
                 "pixelcnn only works with disc_mix_logistic"
 
-        # NOTE: pixelcnn is added later
-        layer_type = "conv" if self.config['decoder_layer_type'] == "pixelcnn" \
-           or self.config['decoder_layer_type'] == "conv" else "dense"
-        fn = net_map[layer_type][not self.config['disable_gated']]
-        print("using {} {} for decoder".format(
-            "gated" if not self.config['disable_gated'] else "standard",
-            self.config['decoder_layer_type']
-        ))
-        return fn
-
-    def _build_decoder(self, input_size, reupsample=True):
-        decoder = self._get_decoder_net_map(reupsample)(input_size=input_size,
-                                                        output_shape=self.input_shape,
-                                                        activation_fn=self.activation_fn)
+        decoder = get_decoder(self.config, reupsample)(input_size=input_size,
+                                                       output_shape=self.input_shape,
+                                                       activation_fn=self.activation_fn)
         # append the variance as necessary
         return self._append_variance_projection(decoder)
 
     def _append_variance_projection(self, decoder):
         if self.config['decoder_layer_type'] == "pixelcnn":
             # pixel CNN already accounts for variance internally
-            self.pixel_cnn = PixelCNN(input_channels=self.chans)
+            self.pixel_cnn = PixelCNN(input_channels=self.chans,
+                                      nr_resnet=2, nr_filters=40,
+                                      nr_logistic_mix=10)
             decoder = nn.Sequential(
                 decoder,
+                self.activation_fn(),
                 self.pixel_cnn
             )
         elif nll_has_variance(self.config['nll_type']):
@@ -227,6 +165,7 @@ class AbstractVAE(nn.Module):
             print("adding variance projector for {} log-likelihood".format(self.config['nll_type']))
             decoder = nn.Sequential(
                 decoder,
+                self.activation_fn(),
                 VarianceProjector(self.input_shape, self.activation_fn, self.config)
             )
 
@@ -251,11 +190,12 @@ class AbstractVAE(nn.Module):
     def generate_pixel_cnn(self, batch_size, decoded=None):
         self.pixel_cnn.eval()
         if decoded is None:  # use zeros if no values provided
-            decoded = zeros([batch_size] + self.config['img_shp'],
+            # XXX: hardcoded cnn projection size, pre-upsample
+            decoded = zeros([batch_size] + [self.config['img_shp'][0], 32, 32],
                             cuda=self.config['cuda'])
 
-        for i in range(self.config['img_shp'][1]):
-            for j in range(self.config['img_shp'][2]):
+        for i in range(decoded.size(2)):
+            for j in range(decoded.size(3)):
                 logits = self.pixel_cnn(decoded, sample=True)
                 out_sample = self.nll_activation(logits)
                 decoded[:, :, i, j] = out_sample[:, :, i, j]
@@ -336,7 +276,9 @@ class AbstractVAE(nn.Module):
         # elbo = -log_likelihood + latent_kl
         # cost = elbo + consistency_kl - self.mutual_info_reg * mutual_info_regularizer
         nll = nll_fn(x, recon_x, self.config['nll_type'])
+        nan_check_and_break(nll, "nll")
         kld = self.config['kl_reg'] * self.kld(params)
+        nan_check_and_break(kld, "kld")
         elbo = nll + kld
 
         # handle the mutual information term

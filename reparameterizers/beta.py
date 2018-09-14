@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributions as D
+import pyro.distributions as PD
 import torch.nn.functional as F
 from torch.autograd import Variable
 
@@ -35,19 +36,20 @@ class Beta(nn.Module):
                 batch_size, self.output_size
             ).zero_() + 1/3
         )
-        return D.Beta(conc1, conc2).sample()
+        return PD.Beta(conc1, conc2).sample()
 
     def _reparametrize_beta(self, conc1, conc2):
         if self.training:
-            # rsample is CPU only ¯\_(ツ)_/¯ , but ok
-            # because it is outside the computational graph
-            beta_cpu = D.Beta(conc1.cpu(), conc2.cpu()).rsample()
-            beta = beta_cpu.cuda() if conc1.is_cuda else beta_cpu
+            # rsample is CPU only ¯\_(ツ)_/¯, see https://tinyurl.com/y9e8mtcd
+            # beta_cpu = D.Beta(conc1.cpu(), conc2.cpu()).rsample()
+            # beta = beta_cpu.cuda() if conc1.is_cuda else beta_cpu
             # once we have GPU rsample just use the following:
             # beta = D.Beta(conc1, conc2).rsample()
+            beta = PD.Beta(conc1, conc2).rsample()
             return beta, {'conc1': conc1, 'conc2': conc2}
 
-        return D.Beta(conc1, conc2).mean, {'conc1': conc1, 'conc2': conc2}
+        # can't use mean like in gaussian because beta mean can be > 1.0
+        return PD.Beta(conc1, conc2).sample(), {'conc1': conc1, 'conc2': conc2}
 
     def reparmeterize(self, logits):
         eps = eps_fn(self.config['half'])
@@ -65,9 +67,9 @@ class Beta(nn.Module):
         return self._reparametrize_beta(conc1, conc2)
 
     def _kld_beta_kerman_prior(self, conc1, conc2):
-        prior = D.Beta(zeros_like(conc1) + 1/3,
-                       zeros_like(conc2) + 1/3)
-        beta = D.Beta(conc1, conc2)
+        prior = PD.Beta(zeros_like(conc1) + 1/3,
+                        zeros_like(conc2) + 1/3)
+        beta = PD.Beta(conc1, conc2)
         return torch.sum(D.kl_divergence(beta, prior), -1)
 
     def kl(self, dist_a, prior=None):
@@ -78,23 +80,23 @@ class Beta(nn.Module):
 
         # we have two distributions provided (eg: VRNN)
         return torch.sum(D.kl_divergence(
-            D.Beta(dist_a['beta']['conc1'], dist_a['beta']['conc2']),
-            D.Beta(prior['beta']['conc1'], prior['beta']['conc2'])
+            PD.Beta(dist_a['beta']['conc1'], dist_a['beta']['conc2']),
+            PD.Beta(prior['beta']['conc1'], prior['beta']['conc2'])
         ), -1)
 
 
     def mutual_info(self, params, eps=1e-9):
         # I(z_d; x) ~ H(z_prior, z_d) + H(z_prior)
-        z_true = D.Beta(params['beta']['conc1'],
-                        params['beta']['conc2'])
-        z_match = D.Beta(params['q_z_given_xhat']['beta']['conc1'],
-                         params['q_z_given_xhat']['beta']['conc2'])
+        z_true = PD.Beta(params['beta']['conc1'],
+                         params['beta']['conc2'])
+        z_match = PD.Beta(params['q_z_given_xhat']['beta']['conc1'],
+                          params['q_z_given_xhat']['beta']['conc2'])
         kl_proxy_to_xent = torch.sum(D.kl_divergence(z_match, z_true), dim=-1)
         return  kl_proxy_to_xent
 
     def log_likelihood(self, z, params):
-        return D.Beta(params['beta']['conc1'],
-                      params['beta']['conc2']).log_prob(z)
+        return PD.Beta(params['beta']['conc1'],
+                       params['beta']['conc2']).log_prob(z)
 
     def forward(self, logits):
         z, beta_params = self.reparmeterize(logits)
