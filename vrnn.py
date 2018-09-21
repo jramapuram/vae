@@ -1,9 +1,12 @@
 import torch
+import functools
 import torch.utils
 import torch.utils.data
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+
+from copy import deepcopy
 
 from .abstract_vae import AbstractVAE
 from .reparameterizers.gumbel import GumbelSoftmax
@@ -14,10 +17,7 @@ from helpers.distributions import nll_activation as nll_activation_fn
 from helpers.distributions import nll as nll_fn
 from helpers.utils import eps as eps_fn
 from helpers.utils import same_type, zeros_like, expand_dims, zeros, nan_check_and_break
-from helpers.layers import build_gated_conv_encoder, build_conv_encoder, \
-    build_dense_encoder, build_gated_conv_decoder, build_conv_decoder, \
-    build_dense_decoder, build_gated_dense_encoder, build_gated_dense_decoder, \
-    build_pixelcnn_decoder, str_to_activ_module
+from helpers.layers import get_encoder, Identity
 
 
 class VRNNMemory(nn.Module):
@@ -51,15 +51,18 @@ class VRNNMemory(nn.Module):
     def clear(self):
         self.memory_buffer.clear()
 
-    def init_state(self, batch_size, cuda=False):
+    def init_state(self, batch_size, cuda=False,
+                   override_noisy_state=False):
         def _init(batch_size, cuda):
             ''' return a single initialized state'''
             num_directions = 2 if self.bidirectional else 1
-            if self.training and self.config['use_noisy_rnn_state']: # add some noise to initial state
-                # nn.init.xavier_uniform_(
-                return same_type(self.config['half'], cuda)(
-                    num_directions * self.n_layers, batch_size, self.h_dim
-                ).normal_(0, 0.01).requires_grad_()
+            # if override_noisy_state or \
+            #    (self.training and self.config['use_noisy_rnn_state']):
+            #     # add some noise to initial state
+            #     # nn.init.xavier_uniform_(
+            #     return same_type(self.config['half'], cuda)(
+            #         num_directions * self.n_layers, batch_size, self.h_dim
+            #     ).normal_(0, 0.01).requires_grad_()
 
             # return zeros for testing
             return same_type(self.config['half'], cuda)(
@@ -125,28 +128,19 @@ class VRNNMemory(nn.Module):
 
 
 class VRNN(AbstractVAE):
-    def __init__(self, input_shape, latent_size,
-                 normalization="none", dense_activation="identity",
-                 n_layers=2, bidirectional=False, **kwargs):
+    def __init__(self, input_shape, n_layers=2, bidirectional=False, **kwargs):
         """implementation of the Variational Recurrent
            Neural Network (VRNN) from https://arxiv.org/abs/1506.02216
 
            params:
 
              normalization: use a separate normalization for the VRNN [eg: GN doesnt work]
-             dense_activation: separate from 'activation' provided from argparse for dense nets
              n_layers: number of RNN layers
              bidirectional: bidirectional RNN
         """
         super(VRNN, self).__init__(input_shape, **kwargs)
-        self.latent_size = latent_size
         self.bidirectional = bidirectional
-        self.normalization = normalization
-
         self.n_layers = n_layers
-
-        # grab the activation nn.Module from the string
-        self.dense_activation_fn = str_to_activ_module(dense_activation)
 
         # build the reparameterizer
         if self.config['reparam_type'] == "isotropic_gaussian":
@@ -178,9 +172,10 @@ class VRNN(AbstractVAE):
 
     def _lazy_build_phi_x(self, input_shape):
         return nn.Sequential(
-            self._get_encoder_net_map()(input_shape=input_shape,
-                                        output_size=self.latent_size,
-                                        activation_fn=self.activation_fn),
+            get_encoder(self.config)(input_shape=input_shape,
+                                     output_size=self.config['latent_size'],
+                                     activation_fn=self.activation_fn),
+            #self.activation_fn()
             nn.SELU()
         )
 
@@ -198,6 +193,11 @@ class VRNN(AbstractVAE):
 
         return self.rnn(x, state)
 
+    def _get_dense_net_map(self, name='vrnn'):
+        '''helper to pull a dense encoder'''
+        config = deepcopy(self.config)
+        config['encoder_layer_type'] = 'dense'
+        return get_encoder(config, name=name)
 
     def _build_model(self):
         input_size = int(np.prod(self.input_shape))
@@ -206,25 +206,30 @@ class VRNN(AbstractVAE):
         self.phi_x = self._build_phi_x_model()
         self.phi_x_i = []
         self.phi_z = nn.Sequential(
-            build_dense_encoder(self.reparameterizer.output_size, self.latent_size,
-                                activation_fn=self.dense_activation_fn,
-                                normalization_str=self.normalization,
-                                nlayers=2),
+            self._get_dense_net_map('phi_z')(
+                self.reparameterizer.output_size, self.config['latent_size'],
+                activation_fn=Identity,     # XXX: hardcode
+                normalization_str='batchnorm',     # XXX: hardcode
+                nlayers=2
+            ),
             nn.SELU()
+            # self.activation_fn()
         )
 
         # prior
-        self.prior = build_dense_encoder(self.latent_size, self.reparameterizer.input_size,
-                                         activation_fn=self.dense_activation_fn,
-                                         normalization_str=self.normalization,
-                                         nlayers=2)
+        self.prior = self._get_dense_net_map('prior')(
+            self.config['latent_size'], self.reparameterizer.input_size,
+            activation_fn=Identity,
+            normalization_str='batchnorm',
+            nlayers=2
+        )
 
         # decoder
-        self.decoder = self._build_decoder(input_size=self.latent_size*2,
+        self.decoder = self._build_decoder(input_size=self.config['latent_size']*2,
                                            reupsample=True)
 
         # memory module that contains the RNN or DNC
-        self.memory = VRNNMemory(h_dim=self.latent_size,
+        self.memory = VRNNMemory(h_dim=self.config['latent_size'],
                                  n_layers=self.n_layers,
                                  bidirectional=self.bidirectional,
                                  config=self.config,
@@ -260,8 +265,12 @@ class VRNN(AbstractVAE):
         else:
             raise Exception("unknown reparam type")
 
-        return 'vrnn_{}ts_'.format(self.config['max_time_steps']) \
-            + super(VRNN, self).get_name(reparam_str)
+        base_str = 'vrnn_{}ts_{}ns_{}pkl'.format(
+            self.config['max_time_steps'],
+            int(self.config['use_noisy_rnn_state']),
+            int(self.config['use_prior_kl'])
+        )
+        return base_str + super(VRNN, self).get_name(reparam_str)
 
     def has_discrete(self):
         ''' True is we have a discrete reparameterization '''
@@ -288,7 +297,7 @@ class VRNN(AbstractVAE):
         }
         rnn = model_fn_map[model_type](
             input_size=input_size,
-            hidden_size=self.latent_size,
+            hidden_size=self.config['latent_size'],
             num_layers=self.n_layers,
             bidirectional=self.bidirectional,
             bias=bias, dropout=dropout
@@ -343,6 +352,7 @@ class VRNN(AbstractVAE):
 
     def decode(self, z_t, produce_output=False, reset_state=False):
         # grab state from RNN, TODO: evaluate recovery methods below
+        # [0] grabs the h from LSTM (as opposed to (h, c))
         final_state = torch.mean(self.memory.get_state()[0], 0)
         # nan_check_and_break(final_state, "final_rnn_output[decode]")
 
@@ -384,10 +394,13 @@ class VRNN(AbstractVAE):
     def _lazy_build_encoder(self, input_size):
         ''' lazy build the encoder based on the input size'''
         if not hasattr(self, 'encoder'):
-            self.encoder = build_dense_encoder(input_size, self.reparameterizer.input_size,
-                                               activation_fn=self.dense_activation_fn,
-                                               normalization_str=self.normalization,
-                                               nlayers=2)
+            self.encoder = self._get_dense_net_map('vrnn_enc')(
+                input_size, self.reparameterizer.input_size,
+                activation_fn=Identity,
+                normalization_str='batchnorm',
+                nlayers=2
+            )
+
         return self.encoder
 
     def encode(self, x, *xargs):
@@ -404,7 +417,7 @@ class VRNN(AbstractVAE):
         enc_t = self._lazy_build_encoder(enc_input_t.size(-1))(enc_input_t)
         # nan_check_and_break(enc_t, "enc_t")
 
-        # prior projection
+        # prior projection , consider: + eps_fn(self.config['cuda']))
         prior_t = self.prior(final_state.contiguous())
         # nan_check_and_break(prior_t, "priot_t")
 
@@ -413,11 +426,6 @@ class VRNN(AbstractVAE):
             'prior_logits': prior_t,
             'x_features': phi_x_t
         }
-
-
-    # def generate_synthetic_samples(self, batch_size, **kwargs):
-    #     ''' simply override VAE to init memory state first'''
-    #     return super(VRNN, self).generate_synthetic_samples(batch_size, **kwargs)
 
     def _decode_pixelcnn_or_normal(self, dec_input_t):
         ''' helper to decode using the pixel-cnn or normal decoder'''
@@ -437,7 +445,8 @@ class VRNN(AbstractVAE):
 
     def generate_synthetic_samples(self, batch_size, **kwargs):
         if 'reset_state' in kwargs and kwargs['reset_state']:
-            self.memory.init_state(batch_size, cuda=self.config['cuda'])
+            self.memory.init_state(batch_size, cuda=self.config['cuda'],
+                                   override_noisy_state=True)
 
         # grab the final state
         final_state = torch.mean(self.memory.get_state()[0], 0)
@@ -518,8 +527,9 @@ class VRNN(AbstractVAE):
 
     def kld(self, dist):
         ''' KL divergence between dist_a and prior as well as constrain prior to hyper-prior'''
-        return self.reparameterizer.kl(dist['posterior'], dist['prior'])  # \
-             # + self.reparameterizer.kl(dist['prior']) / self.config['max_time_steps']
+        prior_kl = self.reparameterizer.kl(dist['prior'])  \
+            if self.config['use_prior_kl'] is True else 0
+        return self.reparameterizer.kl(dist['posterior'], dist['prior']) + prior_kl
 
     def mut_info(self, dist_params_container):
         ''' helper to get mutual info '''
@@ -556,7 +566,8 @@ class VRNN(AbstractVAE):
         return loss_aggregate_map
 
     def loss_function(self, recon_x_container, x_container, params_map):
-        ''' evaluates the loss of the model '''
+        ''' evaluates the loss of the model by simply summing individual losses '''
+        assert len(recon_x_container) == len(x_container) == len(params_map)
         loss_aggregate_map = None
         for recon_x, x, params in zip(recon_x_container, x_container, params_map):
             mut_info_t = self.mut_info(params)
