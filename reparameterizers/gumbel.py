@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.distributions as D
 from torch.autograd import Variable
 
-from helpers.utils import float_type, one_hot, ones_like
+from helpers.utils import float_type, one_hot, ones_like, long_type
 
 
 class GumbelSoftmax(nn.Module):
@@ -21,12 +21,12 @@ class GumbelSoftmax(nn.Module):
         self.output_size = self.config['discrete_size']
 
     def prior(self, batch_size, **kwargs):
-        uniform_probs = float_type(self.config['cuda'])(1, self.output_size[-1]).zero_()
+        uniform_probs = float_type(self.config['cuda'])(1, self.output_size).zero_()
         uniform_probs += 1.0 / self.output_size
         cat = torch.distributions.Categorical(uniform_probs)
-        sample = cat.sample((batch_size*self.output_size[0],))
+        sample = cat.sample((batch_size,))
         return Variable(
-            one_hot(self.output_size[-1], sample, use_cuda=self.config['cuda'])
+            one_hot(self.output_size, sample, use_cuda=self.config['cuda'])
         ).type(float_type(self.config['cuda']))
 
     def _setup_anneal_params(self):
@@ -94,20 +94,19 @@ class GumbelSoftmax(nn.Module):
         p_z = 1.0 / shp[dim]
         log_p_z = np.log(p_z)
         kld_element = log_q_z.exp() * (log_q_z - log_p_z)
-        #return torch.sum(kld_element.view(shp[0], -1), -1)
         return kld_element
 
     def kl(self, dist_a, prior=None):
         if prior == None:  # use standard uniform prior
-            return GumbelSoftmax._kld_categorical_uniform(
+            return torch.sum(GumbelSoftmax._kld_categorical_uniform(
                 dist_a['discrete']['log_q_z'], dim=self.dim
-            )
+            ), -1)
 
         # we have two distributions provided (eg: VRNN)
-        return D.kl_divergence(
+        return torch.sum(D.kl_divergence(
             D.OneHotCategorical(logits=dist_a['discrete']['log_q_z']),
             D.OneHotCategorical(prior['discrete']['log_q_z'])
-        )
+        ), -1)
 
 
     @staticmethod
@@ -140,7 +139,6 @@ class GumbelSoftmax(nn.Module):
         return y.view_as(x), None
 
     def log_likelihood(self, z, params):
-        print("log = ", params['discrete']['logits'].size(), " | z = ", z.size())
         return D.Categorical(logits=params['discrete']['logits']).log_prob(z)
 
     def forward(self, logits):

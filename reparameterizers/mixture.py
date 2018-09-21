@@ -63,6 +63,7 @@ class Mixture(nn.Module):
     def kl(self, dist_a, prior=None):
         continuous_kl = self.continuous.kl(dist_a, prior)
         disc_kl = self.discrete.kl(dist_a, prior)
+        assert continuous_kl.shape == disc_kl.shape, "need to reduce kl to [#batch] before mixture"
         return continuous_kl + disc_kl
 
     def forward(self, logits):
