@@ -56,13 +56,13 @@ class VRNNMemory(nn.Module):
         def _init(batch_size, cuda):
             ''' return a single initialized state'''
             num_directions = 2 if self.bidirectional else 1
-            # if override_noisy_state or \
-            #    (self.training and self.config['use_noisy_rnn_state']):
-            #     # add some noise to initial state
-            #     # nn.init.xavier_uniform_(
-            #     return same_type(self.config['half'], cuda)(
-            #         num_directions * self.n_layers, batch_size, self.h_dim
-            #     ).normal_(0, 0.01).requires_grad_()
+            if override_noisy_state or \
+               (self.training and self.config['use_noisy_rnn_state']):
+                # add some noise to initial state
+                # consider also: nn.init.xavier_uniform_(
+                return same_type(self.config['half'], cuda)(
+                    num_directions * self.n_layers, batch_size, self.h_dim
+                ).normal_(0, 0.01).requires_grad_()
 
             # return zeros for testing
             return same_type(self.config['half'], cuda)(
@@ -208,8 +208,10 @@ class VRNN(AbstractVAE):
         self.phi_z = nn.Sequential(
             self._get_dense_net_map('phi_z')(
                 self.reparameterizer.output_size, self.config['latent_size'],
-                activation_fn=Identity,     # XXX: hardcode
-                normalization_str='batchnorm',     # XXX: hardcode
+                activation_fn=self.activation_fn,
+                normalization_str=self.config['dense_normalization'],
+                #activation_fn=Identity,     # XXX: hardcode
+                #normalization_str='batchnorm',     # XXX: hardcode
                 nlayers=2
             ),
             nn.SELU()
@@ -219,8 +221,10 @@ class VRNN(AbstractVAE):
         # prior
         self.prior = self._get_dense_net_map('prior')(
             self.config['latent_size'], self.reparameterizer.input_size,
-            activation_fn=Identity,
-            normalization_str='batchnorm',
+            activation_fn=self.activation_fn,
+            normalization_str=self.config['dense_normalization'],
+            # activation_fn=Identity,
+            # normalization_str='batchnorm',
             nlayers=2
         )
 
@@ -240,6 +244,7 @@ class VRNN(AbstractVAE):
         self.phi_x = nn.DataParallel(self.phi_x)
         self.phi_z = nn.DataParallel(self.phi_z)
         self.prior = nn.DataParallel(self.prior)
+        self.encoder = nn.DataParallel(self.encoder)
         if self.config['decoder_layer_type'] == "pixelcnn":
             self.decoder = nn.Sequential(
                 nn.DataParallel(self.decoder[0:-1]),
@@ -396,8 +401,10 @@ class VRNN(AbstractVAE):
         if not hasattr(self, 'encoder'):
             self.encoder = self._get_dense_net_map('vrnn_enc')(
                 input_size, self.reparameterizer.input_size,
-                activation_fn=Identity,
-                normalization_str='batchnorm',
+                activation_fn=self.activation_fn,
+                normalization_str=self.config['dense_normalization'],
+                # activation_fn=Identity,
+                # normalization_str='batchnorm',
                 nlayers=2
             )
 
