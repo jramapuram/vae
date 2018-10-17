@@ -41,10 +41,7 @@ class Beta(nn.Module):
     def _reparametrize_beta(self, conc1, conc2):
         if self.training:
             # rsample is CPU only ¯\_(ツ)_/¯, see https://tinyurl.com/y9e8mtcd
-            # beta_cpu = D.Beta(conc1.cpu(), conc2.cpu()).rsample()
-            # beta = beta_cpu.cuda() if conc1.is_cuda else beta_cpu
-            # once we have GPU rsample just use the following:
-            # beta = D.Beta(conc1, conc2).rsample()
+            # thus use pyro which DOES have a GPU version
             beta = PD.Beta(conc1, conc2).rsample()
             return beta, {'conc1': conc1, 'conc2': conc2}
 
@@ -56,11 +53,11 @@ class Beta(nn.Module):
         feature_size = logits.size(-1)
         assert feature_size % 2 == 0 and feature_size // 2 == self.output_size
         if logits.dim() == 2:
-            conc1 = F.sigmoid(logits[:, 0:int(feature_size/2)] + eps)
-            conc2 = F.sigmoid(logits[:, int(feature_size/2):] + eps)
+            conc1 = torch.sigmoid(logits[:, 0:int(feature_size/2)] + eps)
+            conc2 = torch.sigmoid(logits[:, int(feature_size/2):] + eps)
         elif logits.dim() == 3:
-            conc1 = F.sigmoid(logits[:, :, 0:int(feature_size/2)] + eps)
-            conc2 = F.sigmoid(logits[:, :, int(feature_size/2):] + eps)
+            conc1 = torch.sigmoid(logits[:, :, 0:int(feature_size/2)] + eps)
+            conc2 = torch.sigmoid(logits[:, :, int(feature_size/2):] + eps)
         else:
             raise Exception("unknown number of dims for isotropic gauss reparam")
 

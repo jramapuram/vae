@@ -15,10 +15,10 @@ from .reparameterizers.beta import Beta
 from .reparameterizers.isotropic_gaussian import IsotropicGaussian
 from helpers.distributions import nll_activation as nll_activation_fn
 from helpers.distributions import nll as nll_fn
-from helpers.utils import eps as eps_fn
-from helpers.utils import same_type, zeros_like, expand_dims, zeros, nan_check_and_break
 from helpers.layers import get_encoder, Identity
-
+from helpers.utils import eps as eps_fn
+from helpers.utils import same_type, zeros_like, expand_dims, \
+    zeros, nan_check_and_break
 
 class VRNNMemory(nn.Module):
     ''' Helper object to contain states and outputs for the RNN'''
@@ -63,6 +63,7 @@ class VRNNMemory(nn.Module):
                 return same_type(self.config['half'], cuda)(
                     num_directions * self.n_layers, batch_size, self.h_dim
                 ).normal_(0, 0.01).requires_grad_()
+
 
             # return zeros for testing
             return same_type(self.config['half'], cuda)(
@@ -240,18 +241,18 @@ class VRNN(AbstractVAE):
                                  rnn=self._lazy_rnn_lambda,
                                  cuda=self.config['cuda'])
 
+    def fp16(self):
+        self.phi_x = self.phi_x.half()
+        self.phi_z = self.phi_z.half()
+        self.prior = self.prior.half()
+        super(VRNN, self).fp16()
+        # RNN should already be half'd
+
     def parallel(self):
         self.phi_x = nn.DataParallel(self.phi_x)
         self.phi_z = nn.DataParallel(self.phi_z)
         self.prior = nn.DataParallel(self.prior)
-        self.encoder = nn.DataParallel(self.encoder)
-        if self.config['decoder_layer_type'] == "pixelcnn":
-            self.decoder = nn.Sequential(
-                nn.DataParallel(self.decoder[0:-1]),
-                nn.DataParallel(self.decoder[-1])
-            )
-        else:
-            self.decoder = nn.DataParallel(self.decoder)
+        super(VRNN, self).parallel()
 
         # TODO: try to get this working
         #self.memory.model = nn.DataParallel(self.memory.model)
@@ -319,13 +320,13 @@ class VRNN(AbstractVAE):
             feat_size = logits.size(-1)
             return torch.cat(
                 [logits[:, 0:feat_size//2],
-                 F.sigmoid(logits[:, feat_size//2:])],
+                 torch.sigmoid(logits[:, feat_size//2:])],
                 -1)
         elif self.config['reparam_type'] == 'mixture':
             feat_size = self.reparameterizer.num_continuous_input
             return torch.cat(
                 [logits[:, 0:feat_size//2],                    # mean
-                 F.sigmoid(logits[:, feat_size//2:feat_size]), # clamped var
+                 torch.sigmoid(logits[:, feat_size//2:feat_size]), # clamped var
                  logits[:, feat_size:]],                       # discrete
                 -1)
         else:
@@ -478,35 +479,6 @@ class VRNN(AbstractVAE):
 
         # return the activated outputs
         return dec_output_t
-
-
-    # def generate_synthetic_samples(self, batch_size, **kwargs):
-    #     self.memory.init_state(batch_size, cuda=self.config['cuda'])  # reset memory
-    #     z_samples = {
-    #         'posterior': self.reparameterizer.prior(
-    #             batch_size, scale_var=self.config['generative_scale_var'], **kwargs
-    #         ),
-    #         'prior': self.reparameterizer.prior(
-    #             batch_size, scale_var=self.config['generative_scale_var'], **kwargs
-    #         )
-    #     }
-
-    #     if self.config['decoder_layer_type'] == "pixelcnn":
-    #         # hot-swap the non-pixel CNN for the decoder
-    #         full_decoder = self.decoder
-    #         trunc_decoder = self.decoder[0:-1]
-    #         self.decoder = trunc_decoder
-
-    #         # decode the synthetic samples
-    #         decoded = self.decode(z_samples)
-
-    #         # swap back the decoder and run the pixelcnn
-    #         self.decoder = full_decoder
-    #         return self.generate_pixel_cnn(batch_size, decoded)
-
-    #     # in the normal case just decode and activate
-    #     return self.nll_activation(self.decode(z_samples))
-
 
     def posterior(self, *x_args):
         logits_map = self.encode(*x_args)

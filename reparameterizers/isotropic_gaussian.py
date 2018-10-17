@@ -6,7 +6,8 @@ import torch.distributions as D
 import torch.nn.functional as F
 from torch.autograd import Variable
 
-from helpers.utils import zeros_like, ones_like, same_type, float_type, nan_check_and_break
+from helpers.utils import zeros_like, ones_like, same_type, \
+    float_type, nan_check_and_break, is_half
 from helpers.utils import eps as eps_fn
 
 
@@ -28,11 +29,11 @@ class IsotropicGaussian(nn.Module):
         )
 
     def _reparametrize_gaussian(self, mu, logvar):
-        if self.training:
+        if self.training: # returns a stochastic sample for training
             std = logvar.mul(0.5).exp()
-            eps = float_type(self.config['cuda'])(std.size()).normal_().type(
-                    same_type(self.config['half'], self.config['cuda'])
-                )
+            eps = same_type(is_half(logvar), logvar.is_cuda)(
+                logvar.size()
+            ).normal_()
             eps = Variable(eps)
             nan_check_and_break(logvar, "logvar")
             return eps.mul(std).add_(mu), {'mu': mu, 'logvar': logvar}

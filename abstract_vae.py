@@ -171,6 +171,16 @@ class AbstractVAE(nn.Module):
 
         return decoder
 
+    def fp16(self):
+        self.encoder = self.encoder.half()
+        if self.config['decoder_layer_type'] == "pixelcnn":
+            self.decoder = nn.Sequential(
+                self.decoder[0:-1].half(),
+                self.decoder[-1].half()
+            )
+        else:
+            self.decoder = self.decoder.half()
+
     def parallel(self):
         self.encoder = nn.DataParallel(self.encoder)
         if self.config['decoder_layer_type'] == "pixelcnn":
