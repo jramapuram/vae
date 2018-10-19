@@ -103,10 +103,10 @@ class GumbelSoftmax(nn.Module):
             ), -1)
 
         # we have two distributions provided (eg: VRNN)
-        return torch.sum(D.kl_divergence(
+        return D.kl_divergence(
             D.OneHotCategorical(logits=dist_a['discrete']['log_q_z']),
             D.OneHotCategorical(prior['discrete']['log_q_z'])
-        ), -1)
+        )
 
 
     @staticmethod
