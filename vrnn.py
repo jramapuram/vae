@@ -83,6 +83,11 @@ class VRNNMemory(nn.Module):
     def update(self, tpl):
         self._append_to_buffer(tpl)
         self.outputs, self.state = tpl
+        # if  self.state[0] is not None and self.state[0].requires_grad:
+        #     self.state[0].register_hook(lambda x: x.clamp(min=-10, max=10))
+
+        # if self.state[1] is not None and self.state[1].requires_grad:
+        #     self.state[1].register_hook(lambda x: x.clamp(min=-10, max=10))
 
     def forward(self, input_t, reset_state=False):
         batch_size = input_t.size(0)
@@ -117,7 +122,7 @@ class VRNNMemory(nn.Module):
         return self.outputs
 
     def get_merged_memory(self):
-        ''' merges over nlayers of the state which is [nlayer, batch, latent]'''
+        ''' merges over num_layers of the state which is [nlayer, batch, latent]'''
         assert hasattr(self, 'memory_buffer'), "do a forward pass first"
         mem_concat = torch.cat([self._state_from_tuple(mem)[0]
                                 for mem in self.memory_buffer], 0)
@@ -176,8 +181,8 @@ class VRNN(AbstractVAE):
             get_encoder(self.config)(input_shape=input_shape,
                                      output_size=self.config['latent_size'],
                                      activation_fn=self.activation_fn),
-            #self.activation_fn()
-            nn.SELU()
+            self.activation_fn()
+            #nn.SELU()
         )
 
     def _lazy_rnn_lambda(self, x, state,
@@ -213,7 +218,7 @@ class VRNN(AbstractVAE):
                 normalization_str=self.config['dense_normalization'],
                 #activation_fn=Identity,     # XXX: hardcode
                 #normalization_str='batchnorm',     # XXX: hardcode
-                nlayers=2
+                num_layers=2
             ),
             nn.SELU()
             # self.activation_fn()
@@ -226,7 +231,7 @@ class VRNN(AbstractVAE):
             normalization_str=self.config['dense_normalization'],
             # activation_fn=Identity,
             # normalization_str='batchnorm',
-            nlayers=2
+            num_layers=2
         )
 
         # decoder
@@ -299,7 +304,7 @@ class VRNN(AbstractVAE):
 
         model_fn_map = {
             'gru': torch.nn.GRU if not self.config['half'] else apex.RNN.GRU,
-            'lstm': torch.nn.LSTM if not self.config['half'] else apex.RNN.LSTM,
+            'lstm': torch.nn.LSTM if not self.config['half'] else apex.RNN.LSTM
         }
         rnn = model_fn_map[model_type](
             input_size=input_size,
@@ -406,7 +411,7 @@ class VRNN(AbstractVAE):
                 normalization_str=self.config['dense_normalization'],
                 # activation_fn=Identity,
                 # normalization_str='batchnorm',
-                nlayers=2
+                num_layers=2
             )
 
         return self.encoder
@@ -415,7 +420,7 @@ class VRNN(AbstractVAE):
         # get the memory trace, TODO: evaluate different recovery methods below
         batch_size = x.size(0)
         final_state = torch.mean(self.memory.get_state()[0], 0)
-        # nan_check_and_break(final_state, "final_rnn_output")
+        nan_check_and_break(final_state, "final_rnn_output")
 
         # extract input data features
         phi_x_t = self._extract_features(x, *xargs)
@@ -423,11 +428,11 @@ class VRNN(AbstractVAE):
         # encoder projection
         enc_input_t = torch.cat([phi_x_t, final_state], dim=-1)
         enc_t = self._lazy_build_encoder(enc_input_t.size(-1))(enc_input_t)
-        # nan_check_and_break(enc_t, "enc_t")
+        nan_check_and_break(enc_t, "enc_t")
 
         # prior projection , consider: + eps_fn(self.config['cuda']))
         prior_t = self.prior(final_state.contiguous())
-        # nan_check_and_break(prior_t, "priot_t")
+        nan_check_and_break(prior_t, "priot_t")
 
         return {
             'encoder_logits': enc_t,
