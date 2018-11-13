@@ -70,7 +70,9 @@ class AbstractVAE(nn.Module):
         ''' helper to get the name of the model '''
         es_str = "es" + str(int(self.config['early_stop'])) if self.config['early_stop'] \
                  else "epochs" + str(self.config['epochs'])
-        full_hash_str = """_{}{}_{}act{}_cr{}_dr{}_klr{}_gsv{}_mcig{}_mcs{}{}_input{}_batch{}_mut{}d{}c_filter{}_nll{}_lr{}_{}_{}_ngpu{}""".format(
+        full_hash_str = """_{}{}_{}act{}_cr{}_dr{}_klr{}_\
+        gsv{}_mcig{}_mcs{}{}_input{}_batch{}_mut{}\
+        d{}c_filter{}_nll{}_lr{}_{}_{}_ngpu{}""".format(
             str(self.config['encoder_layer_type']),
             str(self.config['decoder_layer_type']),
             reparam_str,
@@ -81,7 +83,8 @@ class AbstractVAE(nn.Module):
             str(self.config['generative_scale_var']),
             str(int(self.config['monte_carlo_infogain'])),
             str(self.config['mut_clamp_strategy']),
-            "{}".format(str(self.config['mut_clamp_value'])) if self.config['mut_clamp_strategy'] == 'clamp' else "",
+            "{}".format(str(self.config['mut_clamp_value'])) \
+            if self.config['mut_clamp_strategy'] == 'clamp' else "",
             str(self.input_shape),
             str(self.config['batch_size']),
             str(self.config['discrete_mut_info']),
@@ -97,6 +100,7 @@ class AbstractVAE(nn.Module):
                                                      .replace(']', '')  \
                                                      .replace(' ', '')  \
                                                      .replace('\n', '') \
+                                                     .replace('\t', '') \
                                                      .replace('{', '') \
                                                      .replace('}', '') \
                                                      .replace(',', '_') \
