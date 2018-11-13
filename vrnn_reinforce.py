@@ -23,7 +23,7 @@ from helpers.utils import same_type, zeros_like, expand_dims, \
 from vrnnmemory import VRNNMemory
 
 
-class VRNN(AbstractVAE):
+class VRNNReinforce(AbstractVAE):
     def __init__(self, input_shape, n_layers=2, bidirectional=False, **kwargs):
         """implementation of the Variational Recurrent
            Neural Network (VRNN) from https://arxiv.org/abs/1506.02216
@@ -34,7 +34,7 @@ class VRNN(AbstractVAE):
              n_layers: number of RNN layers
              bidirectional: bidirectional RNN
         """
-        super(VRNN, self).__init__(input_shape, **kwargs)
+        super(VRNNReinforce, self).__init__(input_shape, **kwargs)
         self.bidirectional = bidirectional
         self.n_layers = n_layers
 
@@ -89,13 +89,16 @@ class VRNN(AbstractVAE):
 
         return self.rnn(x, state)
 
-    def _get_dense_net_map(self, name='vrnn'):
+    def _get_dense_net_map(self, name='vrnn_reinforce'):
         '''helper to pull a dense encoder'''
         config = deepcopy(self.config)
         config['encoder_layer_type'] = 'dense'
         return get_encoder(config, name=name)
 
     def _build_model(self):
+
+        # add baseline R neural network layer!
+
         input_size = int(np.prod(self.input_shape))
 
         # feature-extracting transformations
@@ -124,6 +127,23 @@ class VRNN(AbstractVAE):
             num_layers=2
         )
 
+        # Baseline fc network, input: hidden state h_t
+        # Output (Batchsize, 1) vector
+        self.baseline_net = self._get_dense_net_map('baseline')(
+            self.config['latent_size'], self['batch_size'],
+            activation_fn=activation_fn, nlayers=2
+        )
+
+        # Locator fc network
+        # input: hidden state h_t
+        # std
+        # return:   mu: 2D vector of (B, 2)
+        #           l_t: 2D vector of (B, 2)
+        self.locator = self._get_dense_net_map('locator')(
+            self.input['latent_size'], (self.input['batch_size'], 2),
+            activation_fn=activation_fn, nlayers=2
+        )
+
         # decoder
         self.decoder = self._build_decoder(input_size=self.config['latent_size']*2,
                                            reupsample=True)
@@ -140,14 +160,14 @@ class VRNN(AbstractVAE):
         self.phi_x = self.phi_x.half()
         self.phi_z = self.phi_z.half()
         self.prior = self.prior.half()
-        super(VRNN, self).fp16()
+        super(VRNNReinforce, self).fp16()
         # RNN should already be half'd
 
     def parallel(self):
         self.phi_x = nn.DataParallel(self.phi_x)
         self.phi_z = nn.DataParallel(self.phi_z)
         self.prior = nn.DataParallel(self.prior)
-        super(VRNN, self).parallel()
+        super(VRNNReinforce, self).parallel()
 
         # TODO: try to get this working
         #self.memory.model = nn.DataParallel(self.memory.model)
@@ -166,12 +186,12 @@ class VRNN(AbstractVAE):
         else:
             raise Exception("unknown reparam type")
 
-        base_str = 'vrnn_{}ts_{}ns_{}pkl'.format(
+        base_str = 'vrnn_reinforce_{}ts_{}ns_{}pkl'.format(
             self.config['max_time_steps'],
             int(self.config['use_noisy_rnn_state']),
             int(self.config['use_prior_kl'])
         )
-        return base_str + super(VRNN, self).get_name(reparam_str)
+        return base_str + super(VRNNReinforce, self).get_name(reparam_str)
 
     def has_discrete(self):
         ''' True is we have a discrete reparameterization '''
@@ -305,6 +325,38 @@ class VRNN(AbstractVAE):
             )
 
         return self.encoder
+
+    def get_baseline(self):
+        # Baseline fc network, input: hidden state h_t
+        # Output [mu, sigma^2]
+
+        # Note, must have had a forward pass
+        hidden_state = self._get_hidden_state()
+        base_score = self.baseline(hidden_state)
+
+        return base_score
+
+    def get_locator(self):
+        hidden_state = self._get_hidden_state()
+        # learn this
+        std = self.config['std']
+
+        # compute the mean
+        mu = self.locator(hidden_state.detach())
+
+        # reparam
+        noise = torch.zeros_like(mu)
+        noise.data.normal_(std=std)
+        l_t = mu + noise
+
+        # bound between [-1, 1]
+        l_t = F.tanh(l_t)
+
+        return mu, l_t
+
+    def _get_hidden_state(self):
+        # state = torch.mean(self.vae.memory.get_state()[0], 0)
+        return self.vrnnmemory.get_state()
 
     def encode(self, x, *xargs):
         # get the memory trace, TODO: evaluate different recovery methods below
@@ -445,7 +497,7 @@ class VRNN(AbstractVAE):
         loss_aggregate_map = None
         for recon_x, x, params in zip(recon_x_container, x_container, params_map):
             mut_info_t = self.mut_info(params)
-            loss_t = super(VRNN, self).loss_function(recon_x, x, params,
+            loss_t = super(VRNNReinforce, self).loss_function(recon_x, x, params,
                                                      mut_info=mut_info_t)
             loss_aggregate_map = self._add_loss_map(loss_t, loss_aggregate_map)
 
