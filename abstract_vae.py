@@ -22,9 +22,10 @@ class VarianceProjector(nn.Module):
     def __init__(self, output_shape, activation_fn, config):
         super(VarianceProjector, self).__init__()
         chans = output_shape[0]
+        self.config = config
 
         # build the sequential layer
-        if nll_has_variance(self.config['nll_type']):
+        if nll_has_variance(config['nll_type']):
             if config['decoder_layer_type'] == 'conv':
                 self.decoder_projector = nn.Sequential(
                     #TODO: caused error with groupnorm w/ 32
@@ -210,7 +211,8 @@ class AbstractVAE(nn.Module):
                 out_sample = self.nll_activation(logits)
                 decoded[:, :, i, j] = out_sample[:, :, i, j]
 
-        return decoded
+        rescaling_inv = lambda x : .5 * x  + .5
+        return rescaling_inv(decoded)
 
     def generate_synthetic_samples(self, batch_size, **kwargs):
         z_samples = self.reparameterizer.prior(
@@ -246,6 +248,8 @@ class AbstractVAE(nn.Module):
                                                self.reparameterizer.config['discrete_size'] + 1,
                                                self.config['discrete_size']))])
         discrete_indices = discrete_indices.reshape(-1)
+
+        self.eval() # lock BN / Dropout, etc
         with torch.no_grad():
             z_samples = Variable(torch.from_numpy(
                 one_hot_np(self.reparameterizer.config['discrete_size'],
@@ -255,8 +259,8 @@ class AbstractVAE(nn.Module):
 
             if self.config['reparam_type'] == 'mixture' and self.config['vae_type'] != 'sequential':
                 ''' add in the gaussian prior '''
-                z_gauss = self.reparameterizer.gaussian.prior(z_samples.size(0))
-                z_samples = torch.cat([z_gauss, z_samples], dim=-1)
+                z_cont = self.reparameterizer.gaussian.prior(z_samples.size(0))
+                z_samples = torch.cat([z_cont, z_samples], dim=-1)
 
             return self.nll_activation(self.decode(z_samples))
 
@@ -268,7 +272,7 @@ class AbstractVAE(nn.Module):
     def forward(self, x):
         ''' params is a map of the latent variable's parameters'''
         if self.config['use_pixel_cnn_decoder']:
-            rescaling     = lambda x : (x - .5) * 2.
+            rescaling = lambda x : (x - .5) * 2.
             x = rescaling(x)
 
         # encode to posterior and then decode
@@ -276,9 +280,9 @@ class AbstractVAE(nn.Module):
         decoded = self.decode(z)
 
         # and then tentatively invert for pixel_cnn
-        if self.config['use_pixel_cnn_decoder']:
-            rescaling_inv = lambda x : .5 * x  + .5
-            decoded = rescaling_inv(decoded)
+        # if self.config['use_pixel_cnn_decoder']:
+        #     rescaling_inv = lambda x : .5 * x  + .5
+        #     decoded = rescaling_inv(decoded)
 
         return decoded , params
 
