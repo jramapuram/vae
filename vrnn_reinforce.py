@@ -356,7 +356,7 @@ class VRNNReinforce(AbstractVAE):
 
     def _get_hidden_state(self):
         # state = torch.mean(self.vae.memory.get_state()[0], 0)
-        return self.vrnnmemory.get_state()
+        return torch.mean(self.vrnnmemory.get_state()[0], 0)
 
     def encode(self, x, *xargs):
         # get the memory trace, TODO: evaluate different recovery methods below
