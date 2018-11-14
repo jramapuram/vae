@@ -20,7 +20,7 @@ from helpers.utils import eps as eps_fn
 from helpers.utils import same_type, zeros_like, expand_dims, \
     zeros, nan_check_and_break
 
-from vrnnmemory import VRNNMemory
+from .vrnnmemory import VRNNMemory
 
 
 class VRNNReinforce(AbstractVAE):
@@ -72,14 +72,14 @@ class VRNNReinforce(AbstractVAE):
                                      output_size=self.config['latent_size'],
                                      activation_fn=self.activation_fn),
             self.activation_fn()
-            #nn.SELU()
+            # nn.SELU()
         )
 
     def _lazy_rnn_lambda(self, x, state,
-                          model_type='lstm',
-                          bias=True,
-                          dropout=0):
-        ''' automagically builds[if it does not exist]
+                         model_type='lstm',
+                         bias=True,
+                         dropout=0):
+        ''' automatically builds[if it does not exist]
             and returns the output of an RNN lazily '''
         if not hasattr(self, 'rnn'):
             self.rnn = self._build_rnn_memory_model(input_size=x.size(-1),
@@ -109,8 +109,8 @@ class VRNNReinforce(AbstractVAE):
                 self.reparameterizer.output_size, self.config['latent_size'],
                 activation_fn=self.activation_fn,
                 normalization_str=self.config['dense_normalization'],
-                #activation_fn=Identity,     # XXX: hardcode
-                #normalization_str='batchnorm',     # XXX: hardcode
+                #  activation_fn=Identity,     # XXX: hardcode
+                #  normalization_str='batchnorm',     # XXX: hardcode
                 num_layers=2
             ),
             nn.SELU()
@@ -130,22 +130,21 @@ class VRNNReinforce(AbstractVAE):
         # Baseline fc network, input: hidden state h_t
         # Output (Batchsize, 1) vector
         self.baseline_net = self._get_dense_net_map('baseline')(
-            self.config['latent_size'], self['batch_size'],
-            activation_fn=activation_fn, nlayers=2
+            self.config['latent_size'], 1,
+            activation_fn=self.activation_fn, nlayers=2
         )
 
         # Locator fc network
         # input: hidden state h_t
         # std
         # return:   mu: 2D vector of (B, 2)
-        #           l_t: 2D vector of (B, 2)
-        self.locator = self._get_dense_net_map('locator')(
-            self.input['latent_size'], (self.input['batch_size'], 2),
-            activation_fn=activation_fn, nlayers=2
+        self.locator_net = self._get_dense_net_map('locator')(
+            self.config['latent_size'], 2,
+            activation_fn=self.activation_fn, nlayers=2
         )
 
         # decoder
-        self.decoder = self._build_decoder(input_size=self.config['latent_size']*2,
+        self.decoder = self._build_decoder(input_size=self.config['latent_size'] * 2,
                                            reupsample=True)
 
         # memory module that contains the RNN or DNC
@@ -234,14 +233,14 @@ class VRNNReinforce(AbstractVAE):
         if self.config['reparam_type'] == 'isotropic_gaussian':
             feat_size = logits.size(-1)
             return torch.cat(
-                [logits[:, 0:feat_size//2],
-                 torch.sigmoid(logits[:, feat_size//2:])],
+                [logits[:, 0:feat_size // 2],
+                 torch.sigmoid(logits[:, feat_size // 2:])],
                 -1)
         elif self.config['reparam_type'] == 'mixture':
             feat_size = self.reparameterizer.num_continuous_input
             return torch.cat(
-                [logits[:, 0:feat_size//2],                    # mean
-                 torch.sigmoid(logits[:, feat_size//2:feat_size]), # clamped var
+                [logits[:, 0:feat_size // 2],                    # mean
+                 torch.sigmoid(logits[:, feat_size // 2:feat_size]),  # clamped var
                  logits[:, feat_size:]],                       # discrete
                 -1)
         else:
@@ -332,7 +331,7 @@ class VRNNReinforce(AbstractVAE):
 
         # Note, must have had a forward pass
         hidden_state = self._get_hidden_state()
-        base_score = self.baseline(hidden_state)
+        base_score = self.baseline_net(hidden_state)
 
         return base_score
 
@@ -342,7 +341,7 @@ class VRNNReinforce(AbstractVAE):
         std = self.config['std']
 
         # compute the mean
-        mu = self.locator(hidden_state.detach())
+        mu = self.locator_net(hidden_state.detach())
 
         # reparam
         noise = torch.zeros_like(mu)
@@ -356,7 +355,7 @@ class VRNNReinforce(AbstractVAE):
 
     def _get_hidden_state(self):
         # state = torch.mean(self.vae.memory.get_state()[0], 0)
-        return torch.mean(self.vrnnmemory.get_state()[0], 0)
+        return torch.mean(self.memory.get_state()[0], 0)
 
     def encode(self, x, *xargs):
         # get the memory trace, TODO: evaluate different recovery methods below
@@ -461,7 +460,7 @@ class VRNNReinforce(AbstractVAE):
         ''' helper to get mutual info '''
         mut_info = None
         if (self.config['continuous_mut_info'] > 0
-            or self.config['discrete_mut_info'] > 0):
+                or self.config['discrete_mut_info'] > 0):
             # only grab the mut-info if the scalars above are set
             mut_info = [self.reparameterizer.mutual_info(params['posterior']).unsqueeze(0)
                         for params in dist_params_container]
@@ -498,7 +497,7 @@ class VRNNReinforce(AbstractVAE):
         for recon_x, x, params in zip(recon_x_container, x_container, params_map):
             mut_info_t = self.mut_info(params)
             loss_t = super(VRNNReinforce, self).loss_function(recon_x, x, params,
-                                                     mut_info=mut_info_t)
+                                                              mut_info=mut_info_t)
             loss_aggregate_map = self._add_loss_map(loss_t, loss_aggregate_map)
 
         return self._mean_map(loss_aggregate_map)

@@ -6,6 +6,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+from helpers.layers import get_encoder, Identity
+from helpers.utils import eps as eps_fn
+from helpers.utils import same_type, zeros_like, expand_dims, \
+    zeros, nan_check_and_break
 
 class VRNNMemory(nn.Module):
     ''' Helper object to contain states and outputs for the RNN'''

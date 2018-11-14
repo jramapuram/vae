@@ -20,7 +20,7 @@ from helpers.utils import eps as eps_fn
 from helpers.utils import same_type, zeros_like, expand_dims, \
     zeros, nan_check_and_break
 
-from vrnnmemory import VRNNMemory
+from .vrnnmemory import VRNNMemory
 
 
 class VRNN(AbstractVAE):
