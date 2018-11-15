@@ -129,19 +129,20 @@ class VRNNReinforce(AbstractVAE):
 
         # Baseline fc network, input: hidden state h_t
         # Output (Batchsize, 1) vector
-        self.baseline_net = self._get_dense_net_map('baseline')(
-            self.config['latent_size'], 1,
-            activation_fn=self.activation_fn, nlayers=2
-        )
+        # self.baseline_net = self._get_dense_net_map('baseline')(
+        #     self.config['latent_size'], 1,
+        #     activation_fn=self.activation_fn, nlayers=2
+        # )
+        self.baseline_net = nn.Linear(self.config['latent_size'], 1)
 
         # Locator fc network
         # input: hidden state h_t
         # std
         # return:   mu: 2D vector of (B, 2)
-        self.locator_net = self._get_dense_net_map('locator')(
-            self.config['latent_size'], 2,
-            activation_fn=self.activation_fn, nlayers=2
-        )
+        # self.locator_net = self._get_dense_net_map('locator')(
+        #     self.config['latent_size'], 2,
+        #     activation_fn=self.activation_fn, nlayers=2
+        # )
 
         # decoder
         self.decoder = self._build_decoder(input_size=self.config['latent_size'] * 2,
@@ -335,23 +336,23 @@ class VRNNReinforce(AbstractVAE):
 
         return base_score
 
-    def get_locator(self):
-        hidden_state = self._get_hidden_state()
-        # learn this
-        std = self.config['std']
+    # def get_locator(self):
+    #     hidden_state = self._get_hidden_state()
+    #     # learn this
+    #     std = self.config['std']
 
-        # compute the mean
-        mu = torch.tanh(self.locator_net(hidden_state.detach()))
+    #     # compute the mean
+    #     mu = torch.tanh(self.locator_net(hidden_state.detach()))
 
-        # reparam
-        noise = torch.zeros_like(mu)
-        noise.data.normal_(std=std)
-        l_t = mu + noise
+    #     # reparam
+    #     noise = torch.zeros_like(mu)
+    #     noise.data.normal_(std=std)
+    #     l_t = mu + noise
 
-        # bound between [-1, 1]
-        l_t = F.tanh(l_t)
+    #     # bound between [-1, 1]
+    #     l_t = F.tanh(l_t)
 
-        return mu, l_t
+    #     return mu, l_t
 
     def _get_hidden_state(self):
         # state = torch.mean(self.vae.memory.get_state()[0], 0)
