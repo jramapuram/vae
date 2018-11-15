@@ -341,7 +341,7 @@ class VRNNReinforce(AbstractVAE):
         std = self.config['std']
 
         # compute the mean
-        mu = self.locator_net(hidden_state.detach())
+        mu = torch.tanh(self.locator_net(hidden_state.detach()))
 
         # reparam
         noise = torch.zeros_like(mu)
