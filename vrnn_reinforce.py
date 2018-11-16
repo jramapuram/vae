@@ -133,7 +133,10 @@ class VRNNReinforce(AbstractVAE):
         #     self.config['latent_size'], 1,
         #     activation_fn=self.activation_fn, nlayers=2
         # )
-        self.baseline_net = nn.Linear(self.config['latent_size'], 1)
+        self.baseline_net = nn.Sequential(
+            nn.Linear(self.config['latent_size'], 1),
+            nn.SELU()
+        )
 
         # Locator fc network
         # input: hidden state h_t
@@ -328,7 +331,6 @@ class VRNNReinforce(AbstractVAE):
 
     def get_baseline(self):
         # Baseline fc network, input: hidden state h_t
-        # Output [mu, sigma^2]
 
         # Note, must have had a forward pass
         hidden_state = self._get_hidden_state()
