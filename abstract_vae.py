@@ -8,7 +8,7 @@ from torch.autograd import Variable
 from collections import OrderedDict, Counter
 
 from helpers.pixel_cnn.model import PixelCNN
-from helpers.utils import float_type, zeros, nan_check_and_break
+from helpers.utils import float_type, zeros, nan_check_and_break, one_hot_np
 from helpers.layers import View, flatten_layers, Identity, \
     build_pixelcnn_decoder, add_normalization, str_to_activ_module, get_decoder, get_encoder
 from helpers.distributions import nll_activation as nll_activation_fn
@@ -162,7 +162,7 @@ class AbstractVAE(nn.Module):
                                       nr_logistic_mix=10)
             decoder = nn.Sequential(
                 decoder,
-                self.activation_fn(),
+                #self.activation_fn(),
                 self.pixel_cnn
             )
         elif nll_has_variance(self.config['nll_type']):
@@ -204,16 +204,18 @@ class AbstractVAE(nn.Module):
 
     def generate_pixel_cnn(self, batch_size, decoded=None):
         self.pixel_cnn.eval()
-        if decoded is None:  # use zeros if no values provided
-            # XXX: hardcoded cnn projection size, pre-upsample
-            decoded = zeros([batch_size] + [self.config['img_shp'][0], 32, 32],
-                            cuda=self.config['cuda'])
+        with torch.no_grad():
+            if decoded is None:  # use zeros if no values provided
+                # XXX: hardcoded image shape
+                decoded = zeros(shape=[batch_size, self.chans, 32, 32],
+                                cuda=self.config['cuda'])
 
-        for i in range(decoded.size(2)):
-            for j in range(decoded.size(3)):
-                logits = self.pixel_cnn(decoded, sample=True)
-                out_sample = self.nll_activation(logits)
-                decoded[:, :, i, j] = out_sample[:, :, i, j]
+            for i in range(decoded.size(2)):
+                for j in range(decoded.size(3)):
+                    logits = self.pixel_cnn(decoded, sample=True)
+                    out_sample = self.nll_activation(logits)
+                    decoded[:, :, i, j] = out_sample[:, :, i, j]
+                    torch.cuda.synchronize()
 
         rescaling_inv = lambda x : .5 * x  + .5
         return rescaling_inv(decoded)
@@ -239,7 +241,7 @@ class AbstractVAE(nn.Module):
         # in the normal case just decode and activate
         return self.nll_activation(self.decode(z_samples))
 
-    def generate_synthetic_sequential_samples(self, num_rows=8):
+    def generate_synthetic_sequential_samples(self, num_original_discrete, num_rows=8):
         ''' iterates over all discrete positions and generates samples '''
         assert self.has_discrete()
 
@@ -247,10 +249,10 @@ class AbstractVAE(nn.Module):
         # uses one row for original dimension of discrete component
         discrete_indices = np.array([np.random.randint(begin, end, size=num_rows) for begin, end in
                                      zip(range(0, self.reparameterizer.config['discrete_size'],
-                                               self.config['discrete_size']),
-                                         range(self.config['discrete_size'],
+                                               num_original_discrete),
+                                         range(num_original_discrete,
                                                self.reparameterizer.config['discrete_size'] + 1,
-                                               self.config['discrete_size']))])
+                                               num_original_discrete))])
         discrete_indices = discrete_indices.reshape(-1)
 
         self.eval() # lock BN / Dropout, etc
@@ -263,10 +265,25 @@ class AbstractVAE(nn.Module):
 
             if self.config['reparam_type'] == 'mixture' and self.config['vae_type'] != 'sequential':
                 ''' add in the gaussian prior '''
-                z_cont = self.reparameterizer.gaussian.prior(z_samples.size(0))
+                z_cont = self.reparameterizer.continuous.prior(z_samples.size(0))
                 z_samples = torch.cat([z_cont, z_samples], dim=-1)
 
-            return self.nll_activation(self.decode(z_samples))
+            # the below is to handle the issues with BN
+            # pad the z to be full batch size
+            number_to_return = z_samples.shape[0] # original generate number
+            number_batches_z = int(max(1, np.ceil(
+                float(self.config['batch_size']) / float(number_to_return))))
+            z_padded = torch.cat(
+                [z_samples for _ in range(number_batches_z)], 0
+            )[0:self.config['batch_size']]
+
+            # generate and return the requested number
+            number_batches_to_generate = int(max(1, np.ceil(
+                float(number_to_return) / float(self.config['batch_size']))))
+            generated = torch.cat([self.generate_synthetic_samples(
+                self.config['batch_size'], z_samples=z_padded
+            ) for _ in range(number_batches_to_generate)], 0)
+            return generated[0:number_to_return] # only return num_requested
 
     def nll_activation(self, logits):
         return nll_activation_fn(logits,
@@ -293,6 +310,10 @@ class AbstractVAE(nn.Module):
     def loss_function(self, recon_x, x, params, mut_info=None):
         # elbo = -log_likelihood + latent_kl
         # cost = elbo + consistency_kl - self.mutual_info_reg * mutual_info_regularizer
+        # if self.config['decoder_layer_type'] == 'pixelcnn':
+        #     rescaling = lambda x : (x - .5) * 2.
+        #     x = rescaling(x)
+
         nll = nll_fn(x, recon_x, self.config['nll_type'])
         nan_check_and_break(nll, "nll")
         kld = self.config['kl_reg'] * self.kld(params)
