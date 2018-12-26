@@ -18,7 +18,8 @@ from helpers.distributions import nll as nll_fn
 from helpers.layers import get_encoder, Identity
 from helpers.utils import eps as eps_fn
 from helpers.utils import same_type, zeros_like, expand_dims, \
-    zeros, nan_check_and_break
+    zeros, nan_check_and_break, zero_check_and_break, all_zero_check_and_break,\
+    nan_check, plot_tensor_grid
 
 from .vrnnmemory import VRNNMemory
 
@@ -95,6 +96,9 @@ class VRNNReinforce(AbstractVAE):
         config['encoder_layer_type'] = 'dense'
         return get_encoder(config, name=name)
 
+    # TODO
+    # Hunt down NaN here
+    # phi_x is not a tensor -> print or check fields
     def _build_model(self):
 
         # add baseline R neural network layer!
@@ -102,7 +106,9 @@ class VRNNReinforce(AbstractVAE):
         input_size = int(np.prod(self.input_shape))
 
         # feature-extracting transformations
+
         self.phi_x = self._build_phi_x_model()
+        
         self.phi_x_i = []
         self.phi_z = nn.Sequential(
             self._get_dense_net_map('phi_z')(
@@ -301,7 +307,15 @@ class VRNNReinforce(AbstractVAE):
             each of them projected through it's own NN,
             creating any networks as needed
         '''
+        # all_zero_check_and_break(x, 'x prior to extract features')
         phi_x_t = self.phi_x(x)
+        # print(phi_x_t)
+        if nan_check(phi_x_t, "phi_x_t from self") is True:
+            # found a nan
+            # push image to visdom
+            plot_tensor_grid(phi_x_t.detach().cpu(), save_filename='crops_prior_nan.png')
+            exit(-1)
+
         for i, x_item in enumerate(xargs):
             if len(self.phi_x_i) < i + 1:
                 # add a new model at runtime if needed
@@ -312,7 +326,7 @@ class VRNNReinforce(AbstractVAE):
             phi_x_i = self.phi_x_i[i](x_item)
             phi_x_t = torch.cat([phi_x_t, phi_x_i], -1)
 
-        # nan_check_and_break(phi_x_t, "phi_x_t")
+        nan_check_and_break(phi_x_t, "phi_x_t extract features")
         return phi_x_t
 
     def _lazy_build_encoder(self, input_size):
@@ -367,10 +381,15 @@ class VRNNReinforce(AbstractVAE):
         nan_check_and_break(final_state, "final_rnn_output")
 
         # extract input data features
+        nan_check_and_break(x, 'x')
         phi_x_t = self._extract_features(x, *xargs)
 
         # encoder projection
+        nan_check_and_break(phi_x_t, 'phi_x_t')
+        nan_check_and_break(final_state, 'final_state')
+
         enc_input_t = torch.cat([phi_x_t, final_state], dim=-1)
+        nan_check_and_break(enc_input_t, "enc_input_t")
         enc_t = self._lazy_build_encoder(enc_input_t.size(-1))(enc_input_t)
         nan_check_and_break(enc_t, "enc_t")
 
@@ -417,12 +436,17 @@ class VRNNReinforce(AbstractVAE):
         # the features are run through this network
         phi_z_t = self.phi_z(z_prior_t)
 
+        nan_check_and_break(phi_z_t, 'phi_z_t')
+
         # construct decoder inputs and process
         dec_input_t = torch.cat([phi_z_t, final_state], -1)
         dec_output_t = self._decode_pixelcnn_or_normal(dec_input_t)
 
         # use the decoder output as features to update the RNN
+        nan_check_and_break(dec_output_t, 'dec_output_t')
         phi_x_t = self.phi_x(dec_output_t)
+        nan_check_and_break(phi_x_t, 'phi_x_t decoder output to update RNN')
+
         input_t = torch.cat([phi_x_t, phi_z_t], -1).unsqueeze(0)
         self.memory(input_t.contiguous(), reset_state=False)
 
@@ -489,8 +513,10 @@ class VRNNReinforce(AbstractVAE):
     def _mean_map(loss_aggregate_map):
         ''' helper to reduce all values by the key count '''
         for k in loss_aggregate_map.keys():
+            if k == 'count':
+                continue
             loss_aggregate_map[k] /= loss_aggregate_map['count']
-
+        loss_aggregate_map['count'] = 1
         return loss_aggregate_map
 
     def loss_function(self, recon_x_container, x_container, params_map):
