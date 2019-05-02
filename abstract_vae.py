@@ -170,7 +170,7 @@ class AbstractVAE(nn.Module):
             print("adding variance projector for {} log-likelihood".format(self.config['nll_type']))
             decoder = nn.Sequential(
                 decoder,
-                self.activation_fn(),
+                #self.activation_fn(),
                 VarianceProjector(self.input_shape, self.activation_fn, self.config)
             )
 
@@ -292,7 +292,7 @@ class AbstractVAE(nn.Module):
 
     def forward(self, x):
         ''' params is a map of the latent variable's parameters'''
-        if self.config['use_pixel_cnn_decoder']:
+        if self.config['decoder_layer_type'] == 'pixelcnn':
             rescaling = lambda x : (x - .5) * 2.
             x = rescaling(x)
 
@@ -308,17 +308,15 @@ class AbstractVAE(nn.Module):
         return decoded , params
 
     def loss_function(self, recon_x, x, params, mut_info=None):
-        # elbo = -log_likelihood + latent_kl
-        # cost = elbo + consistency_kl - self.mutual_info_reg * mutual_info_regularizer
-        # if self.config['decoder_layer_type'] == 'pixelcnn':
-        #     rescaling = lambda x : (x - .5) * 2.
-        #     x = rescaling(x)
-
         nll = nll_fn(x, recon_x, self.config['nll_type'])
         nan_check_and_break(nll, "nll")
-        kld = self.config['kl_reg'] * self.kld(params)
+        kld = self.kld(params)
         nan_check_and_break(kld, "kld")
-        elbo = nll + kld
+        elbo = nll + self.config['kl_beta'] * kld
+
+        # add the proxy loss if it exists
+        proxy_loss = self.reparameterizer.proxy_layer.loss_function() \
+            if hasattr(self.reparameterizer, 'proxy_layer') else torch.zeros_like(elbo)
 
         # handle the mutual information term
         if mut_info is None:
@@ -343,6 +341,7 @@ class AbstractVAE(nn.Module):
             'elbo_mean': torch.mean(elbo),
             'nll_mean': torch.mean(nll),
             'kld_mean': torch.mean(kld),
+            'proxy_mean': torch.mean(proxy_loss),
             'mut_info_mean': torch.mean(mut_info)
         }
 
