@@ -12,9 +12,14 @@ from .abstract_vae import AbstractVAE
 
 
 class ParallellyReparameterizedVAE(AbstractVAE):
-    ''' This implementation uses a parallel application of
-        the reparameterizer via the mixture type. '''
     def __init__(self, input_shape, **kwargs):
+        """ Implements a parallel (in the case of mixture-reparam) VAE
+
+        :param input_shape: the input shape
+        :returns: an object of AbstractVAE
+        :rtype: AbstractVAE
+
+        """
         super(ParallellyReparameterizedVAE, self).__init__(input_shape, **kwargs)
 
         # build the reparameterizer
@@ -40,28 +45,13 @@ class ParallellyReparameterizedVAE(AbstractVAE):
         if not 'lazy_init_decoder' in kwargs:
             self.decoder = self.build_decoder()
 
-    def get_name(self):
-        if self.config['reparam_type'] == "mixture":
-            reparam_str = "mixturecat{}gauss{}_".format(
-                str(self.config['discrete_size']),
-                str(self.config['continuous_size'])
-            )
-        elif self.config['reparam_type'] == "isotropic_gaussian" or self.config['reparam_type'] == "beta":
-            reparam_str = "cont{}_".format(str(self.config['continuous_size']))
-        elif self.config['reparam_type'] == "discrete":
-            reparam_str = "disc{}_".format(str(self.config['discrete_size']))
-        else:
-            raise Exception("unknown reparam type")
-
-        return 'parvae_' + super(ParallellyReparameterizedVAE, self).get_name(reparam_str)
-
-    def has_discrete(self):
-        ''' True is we have a discrete reparameterization '''
-        return self.config['reparam_type'] == 'mixture' \
-            or self.config['reparam_type'] == 'discrete'
-
     def get_reparameterizer_scalars(self):
-        ''' basically returns tau from reparameterizers for now '''
+        """ Returns any scalars used in reparameterization.
+
+        :returns: dict of scalars
+        :rtype: dict
+
+        """
         reparam_scalar_map = {}
         if isinstance(self.reparameterizer, GumbelSoftmax):
             reparam_scalar_map['tau_scalar'] = self.reparameterizer.tau
@@ -71,38 +61,83 @@ class ParallellyReparameterizedVAE(AbstractVAE):
         return reparam_scalar_map
 
     def decode(self, z):
-        '''returns logits '''
+        """ Decode a latent z back to x.
+
+        :param z: the latent tensor.
+        :returns: decoded logits (unactivated).
+        :rtype: torch.Tensor
+
+        """
         return self.decoder(z.contiguous())
 
     def posterior(self, x):
+        """ Encodes, reparmeterizes and returns dict.
+
+        :param x: the input tensor
+        :returns: an encode dict
+        :rtype: dict
+
+        """
         z_logits = self.encode(x)
         return self.reparameterize(z_logits)
 
     def reparameterize(self, logits):
-        ''' reparameterizes the latent logits appropriately '''
+        """ Reparameterize the logits and returns a dict.
+
+        :param logits: unactivated encoded logits.
+        :returns: reparam dict
+        :rtype: dict
+
+        """
         return self.reparameterizer(logits)
 
     def encode(self, x):
-        ''' encodes via a convolution
-            and lazy init's a dense projector'''
-        return self.encoder(x)         # do the convolution
+        """ Encodes a tensor x to a set of logits.
+
+        :param x: the input tensor
+        :returns: logits
+        :rtype: torch.Tensor
+
+        """
+        return self.encoder(x)
 
     def kld(self, dist_a):
-        ''' KL divergence between dist_a and prior '''
+        """ KL-Divergence of the distribution dict and the prior of that distribution.
+
+        :param dist_a: the distribution dict.
+        :returns: tensor that is of dimension batch_size
+        :rtype: torch.Tensor
+
+        """
         return self.reparameterizer.kl(dist_a)
 
     def mut_info(self, dist_params):
-        ''' helper to get mutual info '''
+        """ Returns mutual information between z <-> x
+
+        :param dist_params: the distribution dict
+        :returns: tensor of dimension batch_size
+        :rtype: torch.Tensor
+
+        """
         mut_info = None
+
+        # only grab the mut-info if the scalars above are set
         if (self.config['continuous_mut_info'] > 0
              or self.config['discrete_mut_info'] > 0):
-            # only grab the mut-info if the scalars above are set
             mut_info = self.reparameterizer.mutual_info(dist_params)
 
         return mut_info
 
     def loss_function(self, recon_x, x, params):
-        ''' evaluates the loss of the model '''
+        """ The -ELBO.
+
+        :param recon_x: the (unactivated) reconstruction logits
+        :param x: the original tensor
+        :param params: the reparam dict
+        :returns: loss dict
+        :rtype: dict
+
+        """
         mut_info = self.mut_info(params)
         return super(ParallellyReparameterizedVAE, self).loss_function(recon_x, x, params,
                                                                        mut_info=mut_info)

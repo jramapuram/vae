@@ -17,19 +17,25 @@ from helpers.distributions import nll_has_variance
 
 
 class VarianceProjector(nn.Module):
-    ''' simple helper to project to 2 * chans if we have variance;
-        or do nothing otherwise :) '''
     def __init__(self, output_shape, activation_fn, config):
+        """ Simple helper to project to 2 * chans if we have variance.
+            Else do nothing otherwise
+
+        :param output_shape: the output shape to project to
+        :param activation_fn: the activation to use
+        :param config: argparse dict
+        :returns: object
+        :rtype: object
+
+        """
         super(VarianceProjector, self).__init__()
         chans = output_shape[0]
         self.config = config
 
         # build the sequential layer
         if nll_has_variance(config['nll_type']):
-            if config['decoder_layer_type'] == 'conv':
+            if config['decoder_layer_type'] in ['conv', 'coordconv', 'resnet']:
                 self.decoder_projector = nn.Sequential(
-                    #TODO: caused error with groupnorm w/ 32
-                    #add_normalization(Identity(), config['normalization'], 2, self.chans, num_groups=32),
                     activation_fn(),
                     nn.ConvTranspose2d(chans, chans*2, 1, stride=1, bias=False)
                 )
@@ -51,110 +57,73 @@ class VarianceProjector(nn.Module):
 
 
 class AbstractVAE(nn.Module):
-    ''' abstract base class for VAE, both sequentialVAE and parallelVAE inherit this '''
     def __init__(self, input_shape, **kwargs):
+        """ Abstract base class for VAE.
+
+        :param input_shape: the input tensor shape
+        :returns: instantiation of object
+        :rtype: object
+
+        """
         super(AbstractVAE, self).__init__()
         self.input_shape = input_shape
         self.is_color = input_shape[0] > 1
         self.chans = 3 if self.is_color else 1
-
-        # grab the meta config and print for
         self.config = kwargs['kwargs']
-        pp = pprint.PrettyPrinter(indent=4)
-        pp.pprint(self.config)
 
         # grab the activation nn.Module from the string
         self.activation_fn = str_to_activ_module(self.config['activation'])
 
-    def get_name(self, reparam_str):
-        ''' helper to get the name of the model '''
-        es_str = "es" + str(int(self.config['early_stop'])) if self.config['early_stop'] \
-                 else "epochs" + str(self.config['epochs'])
-        full_hash_str = """_{}{}_{}act{}_cr{}_dr{}_klr{}_\
-        gsv{}_mcig{}_mcs{}{}_input{}_batch{}_mut{}\
-        d{}c_filter{}_nll{}_lr{}_{}_{}_ngpu{}""".format(
-            str(self.config['encoder_layer_type']),
-            str(self.config['decoder_layer_type']),
-            reparam_str,
-            str(self.activation_fn.__name__),
-            self.config['conv_normalization'],
-            self.config['dense_normalization'],
-            str(self.config['kl_reg']),
-            str(self.config['generative_scale_var']),
-            str(int(self.config['monte_carlo_infogain'])),
-            str(self.config['mut_clamp_strategy']),
-            "{}".format(str(self.config['mut_clamp_value'])) \
-            if self.config['mut_clamp_strategy'] == 'clamp' else "",
-            str(self.input_shape),
-            str(self.config['batch_size']),
-            str(self.config['discrete_mut_info']),
-            str(self.config['continuous_mut_info']),
-            str(self.config['filter_depth']),
-            str(self.config['nll_type']),
-            str(self.config['lr']),
-            es_str,
-            str(self.config['optimizer']),
-            str(self.config['ngpu'])
-        )
-        full_hash_str = full_hash_str.strip().lower().replace('[', '')  \
-                                                     .replace(']', '')  \
-                                                     .replace(' ', '')  \
-                                                     .replace('\n', '') \
-                                                     .replace('\t', '') \
-                                                     .replace('{', '') \
-                                                     .replace('}', '') \
-                                                     .replace(',', '_') \
-                                                     .replace(':', '') \
-                                                     .replace('(', '') \
-                                                     .replace(')', '') \
-                                                     .replace('\'', '')
-        task_cleaned = AbstractVAE._clean_task_str(self.config['task'])
-        return task_cleaned + full_hash_str
-
-
-    @staticmethod
-    def _clean_task_str(task_str):
-        ''' helper to reduce string length.
-            eg: mnist+svhn+mnist --> mnist2svhn1 '''
-        result_str = ''
-        if '+' in task_str:
-            splits = Counter(task_str.split('+'))
-            for k, v in splits.items():
-                result_str += '{}{}'.format(k, v)
-
-            return result_str
-
-        return task_str
-
     def build_encoder(self):
+        """ helper to build the encoder type
+
+        :returns: an encoder
+        :rtype: nn.Module
+
+        """
         return get_encoder(self.config)(input_shape=self.input_shape,
                                         output_size=self.reparameterizer.input_size,
                                         activation_fn=self.activation_fn)
 
     def lazy_build_decoder(self, input_size):
-        ''' lazily build the decoder network '''
+        """ Lazily build the decoder network given the input_size
+
+        :param input_size: the input size of the latent vector
+        :returns: a decoder
+        :rtype: nn.Module
+
+        """
         if not hasattr(self, 'decoder'):
             setattr(self, 'decoder', self._build_decoder(input_size))
 
         return self.decoder
 
-    def build_decoder(self):
-        ''' helper function to build convolutional or dense decoder'''
-        return self._build_decoder(self.reparameterizer.output_size)
+    def build_decoder(self, reupsample=True):
+        """ helper function to build convolutional or dense decoder
 
-    def _build_decoder(self, input_size, reupsample=True):
-        # sanity check, pcnn only works with discrete mixture logistic
+        :returns: a decoder
+        :rtype: nn.Module
+
+        """
         if self.config['decoder_layer_type'] == "pixelcnn":
             assert self.config['nll_type'] == "disc_mix_logistic", \
                 "pixelcnn only works with disc_mix_logistic"
 
-        decoder = get_decoder(self.config, reupsample)(input_size=input_size,
+        decoder = get_decoder(self.config, reupsample)(input_size=self.reparameterizer.output_size,
                                                        output_shape=self.input_shape,
                                                        activation_fn=self.activation_fn)
         # append the variance as necessary
         return self._append_variance_projection(decoder)
 
     def _append_variance_projection(self, decoder):
+        """ Appends a decoder variance for gaussian, etc.
+
+        :param decoder: the nn.Module
+        :returns: appended variance projector to decoder
+        :rtype: nn.Module
+
+        """
+
         if self.config['decoder_layer_type'] == "pixelcnn":
             # pixel CNN already accounts for variance internally
             self.pixel_cnn = PixelCNN(input_channels=self.chans,
@@ -170,13 +139,19 @@ class AbstractVAE(nn.Module):
             print("adding variance projector for {} log-likelihood".format(self.config['nll_type']))
             decoder = nn.Sequential(
                 decoder,
-                #self.activation_fn(),
-                VarianceProjector(self.input_shape, self.activation_fn, self.config)
+                # TODO: if you need variance on the decoded distribution use the following:
+                # VarianceProjector(self.input_shape, self.activation_fn, self.config)
             )
 
         return decoder
 
     def fp16(self):
+        """ FP16-ify the model
+
+        :returns: None
+        :rtype: None
+
+        """
         self.encoder = self.encoder.half()
         if self.config['decoder_layer_type'] == "pixelcnn":
             self.decoder = nn.Sequential(
@@ -187,6 +162,12 @@ class AbstractVAE(nn.Module):
             self.decoder = self.decoder.half()
 
     def parallel(self):
+        """ DataParallel this module
+
+        :returns: None
+        :rtype: None
+
+        """
         self.encoder = nn.DataParallel(self.encoder)
         if self.config['decoder_layer_type'] == "pixelcnn":
             self.decoder = nn.Sequential(
@@ -197,12 +178,25 @@ class AbstractVAE(nn.Module):
             self.decoder = nn.DataParallel(self.decoder)
 
     def compile_full_model(self):
-        ''' takes all the submodules and module-lists
-            and returns one gigantic sequential_model '''
+        """ Takes all the submodules and module-lists
+            and returns one gigantic sequential_model
+
+        :returns: None
+        :rtype: None
+
+        """
         full_model_list, _ = flatten_layers(self)
         return nn.Sequential(OrderedDict(full_model_list))
 
     def generate_pixel_cnn(self, batch_size, decoded=None):
+        """ Generates auto-regressively.
+
+        :param batch_size: batch size for generations
+        :param decoded: the input logits
+        :returns: logits tensor
+        :rtype: torch.Tensor
+
+        """
         self.pixel_cnn.eval()
         with torch.no_grad():
             if decoded is None:  # use zeros if no values provided
@@ -221,6 +215,13 @@ class AbstractVAE(nn.Module):
         return rescaling_inv(decoded)
 
     def generate_synthetic_samples(self, batch_size, **kwargs):
+        """ Generates samples with VAE.
+
+        :param batch_size: the number of samples to generate.
+        :returns: decoded logits
+        :rtype: torch.Tensor
+
+        """
         z_samples = self.reparameterizer.prior(
             batch_size, scale_var=self.config['generative_scale_var'], **kwargs
         )
@@ -242,7 +243,14 @@ class AbstractVAE(nn.Module):
         return self.nll_activation(self.decode(z_samples))
 
     def generate_synthetic_sequential_samples(self, num_original_discrete, num_rows=8):
-        ''' iterates over all discrete positions and generates samples '''
+        """ Iterates over all discrete positions and generates samples (for mix or disc only).
+
+        :param num_original_discrete: The original discrete size (useful for LLVAE).
+        :param num_rows: for visdom
+        :returns: decoded logits
+        :rtype: torch.Tensor
+
+        """
         assert self.has_discrete()
 
         # create a grid of one-hot vectors for displaying in visdom
@@ -286,12 +294,36 @@ class AbstractVAE(nn.Module):
             return generated[0:number_to_return] # only return num_requested
 
     def nll_activation(self, logits):
+        """ Activates the logits
+
+        :param logits: the unactivated logits
+        :returns: activated logits.
+        :rtype: torch.Tensor
+
+        """
         return nll_activation_fn(logits,
                                  self.config['nll_type'],
                                  chans=self.chans)
 
+    def has_discrete(self):
+        """ True is we have a discrete reparameterization
+
+        :returns: boolean
+        :rtype: bool
+
+        """
+        return self.config['reparam_type'] == 'mixture' \
+            or self.config['reparam_type'] == 'discrete'
+
+
     def forward(self, x):
-        ''' params is a map of the latent variable's parameters'''
+        """ Accepts input, gets posterior and latent and decodes.
+
+        :param x: input tensor.
+        :returns: decoded logits and reparam dict
+        :rtype: torch.Tensor, dict
+
+        """
         if self.config['decoder_layer_type'] == 'pixelcnn':
             rescaling = lambda x : (x - .5) * 2.
             x = rescaling(x)
@@ -308,6 +340,16 @@ class AbstractVAE(nn.Module):
         return decoded , params
 
     def loss_function(self, recon_x, x, params, mut_info=None):
+        """ Produces ELBO, handles mutual info and proxy loss terms too.
+
+        :param recon_x: the unactivated reconstruction preds.
+        :param x: input tensor.
+        :param params: the dict of reparameterization.
+        :param mut_info: the calculated mutual info.
+        :returns: loss dict
+        :rtype: dict
+
+        """
         nll = nll_fn(x, recon_x, self.config['nll_type'])
         nan_check_and_break(nll, "nll")
         kld = self.kld(params)
@@ -346,36 +388,82 @@ class AbstractVAE(nn.Module):
         }
 
     def has_discrete(self):
-        ''' returns True if the model has a discrete
-            as it's first (in the case of parallel) reparameterizer'''
+        """ returns True if the model has a discrete
+            as it's first (in the case of parallel) reparameterizer
+
+        :returns: True/False
+        :rtype: bool
+
+        """
         raise NotImplementedError("has_discrete not implemented")
 
     def get_reparameterizer_scalars(self):
-        ''' returns a map of the scalars of the reparameterizers.
-            This is useful for visualization purposes'''
+        """ returns a map of the scalars of the reparameterizers.
+            This is useful for visualization purposes
+
+        :returns: dict of scalars
+        :rtype: dict
+
+        """
         raise NotImplementedError("get_reparameterizer_scalars not implemented")
 
     def reparameterize(self, logits):
-        ''' reparameterizes the latent logits appropriately '''
+        """ reparameterizes the latent logits appropriately
+
+        :param logits: encoded posterior logits
+        :returns: reparam dict.
+        :rtype: torch.Tensor
+
+        """
         raise NotImplementedError("reparameterize not implemented")
 
     def decode(self, z):
-        '''returns logits '''
+        """ Decodes posterior repr to unactivated logits.
+
+        :param z: the latent representation.
+        :returns: the decoded logits
+        :rtype: torch.Tensor
+
+        """
         raise NotImplementedError("decode not implemented")
 
     def posterior(self, x):
-        ''' get a reparameterized Q(z|x) for a given x '''
+        """ get a reparameterized Q(z|x) for a given x
+
+        :param x: input tensor
+        :returns: reparam dict
+        :rtype: torch.Tensor
+
+        """
         z_logits = self.encode(x)
         return self.reparameterize(z_logits)
 
     def encode(self, x):
-        ''' encodes via a convolution and returns logits '''
+        """ encodes via a convolution and returns logits
+
+        :param x: input tensor
+        :returns: encoded logits
+        :rtype: torch.Tensor
+
+        """
         raise NotImplementedError("encode not implemented")
 
     def kld(self, dist_params):
-        ''' KL divergence between dist_a and prior '''
+        """ KL divergence between dist_a and prior
+
+        :param dist_params: the distribution param dict
+        :returns: batch_size tensor of kld
+        :rtype: torch.Tensor
+
+        """
         raise NotImplementedError("kld not implemented")
 
     def mut_info(self, dist_params):
-        ''' helper to get the mutual info to add to the loss '''
+        """ helper to get the mutual info to add to the loss
+
+        :param dist_params: the distribution param dict
+        :returns: batch_size tensor of mut-info
+        :rtype: torch.Tensor
+
+        """
         raise NotImplementedError("mut_info not implemented")

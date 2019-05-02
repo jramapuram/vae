@@ -545,6 +545,9 @@ class VRNN(AbstractVAE):
     def _mean_map(loss_aggregate_map):
         ''' helper to reduce all values by the key count '''
         for k in loss_aggregate_map.keys():
+            if k == 'count':
+                continue
+
             loss_aggregate_map[k] /= loss_aggregate_map['count']
 
         return loss_aggregate_map
