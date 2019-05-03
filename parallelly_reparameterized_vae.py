@@ -23,25 +23,28 @@ class ParallellyReparameterizedVAE(AbstractVAE):
         super(ParallellyReparameterizedVAE, self).__init__(input_shape, **kwargs)
 
         # build the reparameterizer
-        if self.config['reparam_type'] == "isotropic_gaussian":
-            print("using isotropic gaussian reparameterizer")
-            self.reparameterizer = IsotropicGaussian(self.config)
-        elif self.config['reparam_type'] == "discrete":
-            print("using gumbel softmax reparameterizer")
-            self.reparameterizer = GumbelSoftmax(self.config)
-        elif self.config['reparam_type'] == "beta":
-            print("using beta reparameterizer")
-            self.reparameterizer = Beta(self.config)
-        elif self.config['reparam_type'] == "mixture":
-            print("using mixture reparameterizer")
-            self.reparameterizer = Mixture(num_discrete=self.config['discrete_size'],
-                                           num_continuous=self.config['continuous_size'],
-                                           config=self.config)
-        else:
-            raise Exception("unknown reparameterization type")
+        if not 'lazy_init_reparameterizer' in kwargs:
+            if self.config['reparam_type'] == "isotropic_gaussian":
+                print("using isotropic gaussian reparameterizer")
+                self.reparameterizer = IsotropicGaussian(self.config)
+            elif self.config['reparam_type'] == "discrete":
+                print("using gumbel softmax reparameterizer")
+                self.reparameterizer = GumbelSoftmax(self.config)
+            elif self.config['reparam_type'] == "beta":
+                print("using beta reparameterizer")
+                self.reparameterizer = Beta(self.config)
+            elif self.config['reparam_type'] == "mixture":
+                print("using mixture reparameterizer")
+                self.reparameterizer = Mixture(num_discrete=self.config['discrete_size'],
+                                               num_continuous=self.config['continuous_size'],
+                                               config=self.config)
+            else:
+                raise Exception("unknown reparameterization type")
 
         # build the encoder and decoder
-        self.encoder = self.build_encoder()
+        if not 'lazy_init_encoder' in kwargs:
+            self.encoder = self.build_encoder()
+
         if not 'lazy_init_decoder' in kwargs:
             self.decoder = self.build_decoder()
 
