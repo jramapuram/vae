@@ -74,6 +74,15 @@ class AbstractVAE(nn.Module):
         # grab the activation nn.Module from the string
         self.activation_fn = str_to_activ_module(self.config['activation'])
 
+    def get_reparameterizer_scalars(self):
+        """ return the reparameterization scalars (eg: tau in gumbel)
+
+        :returns: a dict of scalars
+        :rtype: dict
+
+        """
+        return self.reparameterizer.get_reparameterizer_scalars()
+
     def build_encoder(self):
         """ helper to build the encoder type
 
@@ -405,27 +414,27 @@ class AbstractVAE(nn.Module):
         :rtype: dict
 
         """
-        raise NotImplementedError("get_reparameterizer_scalars not implemented")
+        return self.reparameterizer.get_reparameterizer_scalars()
 
     def reparameterize(self, logits):
-        """ reparameterizes the latent logits appropriately
+        """ Reparameterize the logits and returns a dict.
 
-        :param logits: encoded posterior logits
-        :returns: reparam dict.
-        :rtype: torch.Tensor
+        :param logits: unactivated encoded logits.
+        :returns: reparam dict
+        :rtype: dict
 
         """
-        raise NotImplementedError("reparameterize not implemented")
+        return self.reparameterizer(logits)
 
     def decode(self, z):
-        """ Decodes posterior repr to unactivated logits.
+        """ Decode a latent z back to x.
 
-        :param z: the latent representation.
-        :returns: the decoded logits
+        :param z: the latent tensor.
+        :returns: decoded logits (unactivated).
         :rtype: torch.Tensor
 
         """
-        raise NotImplementedError("decode not implemented")
+        return self.decoder(z.contiguous())
 
     def posterior(self, x):
         """ get a reparameterized Q(z|x) for a given x
@@ -439,31 +448,38 @@ class AbstractVAE(nn.Module):
         return self.reparameterize(z_logits)
 
     def encode(self, x):
-        """ encodes via a convolution and returns logits
+        """ Encodes a tensor x to a set of logits.
 
-        :param x: input tensor
-        :returns: encoded logits
+        :param x: the input tensor
+        :returns: logits
         :rtype: torch.Tensor
 
         """
-        raise NotImplementedError("encode not implemented")
+        return self.encoder(x)
 
-    def kld(self, dist_params):
-        """ KL divergence between dist_a and prior
+    def kld(self, dist_a):
+        """ KL-Divergence of the distribution dict and the prior of that distribution.
 
-        :param dist_params: the distribution param dict
-        :returns: batch_size tensor of kld
+        :param dist_a: the distribution dict.
+        :returns: tensor that is of dimension batch_size
         :rtype: torch.Tensor
 
         """
-        raise NotImplementedError("kld not implemented")
+        return self.reparameterizer.kl(dist_a)
 
     def mut_info(self, dist_params):
-        """ helper to get the mutual info to add to the loss
+        """ Returns mutual information between z <-> x
 
-        :param dist_params: the distribution param dict
-        :returns: batch_size tensor of mut-info
+        :param dist_params: the distribution dict
+        :returns: tensor of dimension batch_size
         :rtype: torch.Tensor
 
         """
-        raise NotImplementedError("mut_info not implemented")
+        mut_info = None
+
+        # only grab the mut-info if the scalars above are set
+        if (self.config['continuous_mut_info'] > 0
+             or self.config['discrete_mut_info'] > 0):
+            mut_info = self.reparameterizer.mutual_info(dist_params)
+
+        return mut_info

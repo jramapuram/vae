@@ -1,18 +1,11 @@
 from __future__ import print_function
-import numpy as np
-import torch
-import torch.nn as nn
 
-from helpers.layers import str_to_activ_module
-from .reparameterizers.gumbel import GumbelSoftmax
-from .reparameterizers.mixture import Mixture
-from .reparameterizers.beta import Beta
-from .reparameterizers.isotropic_gaussian import IsotropicGaussian
 from .abstract_vae import AbstractVAE
+from .reparameterizers.concat_reparameterizer import ConcatReparameterizer
 
 
 class ParallellyReparameterizedVAE(AbstractVAE):
-    def __init__(self, input_shape, **kwargs):
+    def __init__(self, input_shape, reparameterizer_strs=["discrete", "isotropic_gaussian"], **kwargs):
         """ Implements a parallel (in the case of mixture-reparam) VAE
 
         :param input_shape: the input shape
@@ -21,115 +14,22 @@ class ParallellyReparameterizedVAE(AbstractVAE):
 
         """
         super(ParallellyReparameterizedVAE, self).__init__(input_shape, **kwargs)
+        self.reparameterizer_strs = reparameterizer_strs
+        self.reparameterizer = ConcatReparameterizer(reparameterizer_strs, self.config)
 
-        # build the reparameterizer
-        if not 'lazy_init_reparameterizer' in kwargs:
-            if self.config['reparam_type'] == "isotropic_gaussian":
-                print("using isotropic gaussian reparameterizer")
-                self.reparameterizer = IsotropicGaussian(self.config)
-            elif self.config['reparam_type'] == "discrete":
-                print("using gumbel softmax reparameterizer")
-                self.reparameterizer = GumbelSoftmax(self.config)
-            elif self.config['reparam_type'] == "beta":
-                print("using beta reparameterizer")
-                self.reparameterizer = Beta(self.config)
-            elif self.config['reparam_type'] == "mixture":
-                print("using mixture reparameterizer")
-                self.reparameterizer = Mixture(num_discrete=self.config['discrete_size'],
-                                               num_continuous=self.config['continuous_size'],
-                                               config=self.config)
-            else:
-                raise Exception("unknown reparameterization type")
+        # build the encoder and decoder here because of sizing
+        self.encoder = self.build_encoder()
+        self.decoder = self.build_decoder()
 
-        # build the encoder and decoder
-        if not 'lazy_init_encoder' in kwargs:
-            self.encoder = self.build_encoder()
 
-        if not 'lazy_init_decoder' in kwargs:
-            self.decoder = self.build_decoder()
+    def has_discrete(self):
+        """ Returns true if there is a discrete reparameterization.
 
-    def get_reparameterizer_scalars(self):
-        """ Returns any scalars used in reparameterization.
-
-        :returns: dict of scalars
-        :rtype: dict
+        :returns: True/False
+        :rtype: bool
 
         """
-        reparam_scalar_map = {}
-        if isinstance(self.reparameterizer, GumbelSoftmax):
-            reparam_scalar_map['tau_scalar'] = self.reparameterizer.tau
-        elif isinstance(self.reparameterizer, Mixture):
-            reparam_scalar_map['tau_scalar'] = self.reparameterizer.discrete.tau
-
-        return reparam_scalar_map
-
-    def decode(self, z):
-        """ Decode a latent z back to x.
-
-        :param z: the latent tensor.
-        :returns: decoded logits (unactivated).
-        :rtype: torch.Tensor
-
-        """
-        return self.decoder(z.contiguous())
-
-    def posterior(self, x):
-        """ Encodes, reparmeterizes and returns dict.
-
-        :param x: the input tensor
-        :returns: an encode dict
-        :rtype: dict
-
-        """
-        z_logits = self.encode(x)
-        return self.reparameterize(z_logits)
-
-    def reparameterize(self, logits):
-        """ Reparameterize the logits and returns a dict.
-
-        :param logits: unactivated encoded logits.
-        :returns: reparam dict
-        :rtype: dict
-
-        """
-        return self.reparameterizer(logits)
-
-    def encode(self, x):
-        """ Encodes a tensor x to a set of logits.
-
-        :param x: the input tensor
-        :returns: logits
-        :rtype: torch.Tensor
-
-        """
-        return self.encoder(x)
-
-    def kld(self, dist_a):
-        """ KL-Divergence of the distribution dict and the prior of that distribution.
-
-        :param dist_a: the distribution dict.
-        :returns: tensor that is of dimension batch_size
-        :rtype: torch.Tensor
-
-        """
-        return self.reparameterizer.kl(dist_a)
-
-    def mut_info(self, dist_params):
-        """ Returns mutual information between z <-> x
-
-        :param dist_params: the distribution dict
-        :returns: tensor of dimension batch_size
-        :rtype: torch.Tensor
-
-        """
-        mut_info = None
-
-        # only grab the mut-info if the scalars above are set
-        if (self.config['continuous_mut_info'] > 0
-             or self.config['discrete_mut_info'] > 0):
-            mut_info = self.reparameterizer.mutual_info(dist_params)
-
-        return mut_info
+        return isinstance(self.reparameterizer.reparameterizers[0], GumbelSoftmax)
 
     def loss_function(self, recon_x, x, params):
         """ The -ELBO.

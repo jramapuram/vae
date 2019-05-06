@@ -1,6 +1,5 @@
 from __future__ import print_function
 import pprint
-import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -13,6 +12,7 @@ from functools import partial
 from helpers.utils import float_type, ones_like
 from helpers.layers import get_encoder, str_to_activ_module
 from .beta import Beta
+from .bernoulli import Bernoulli
 from .gumbel import GumbelSoftmax
 from .mixture import Mixture
 from .isotropic_gaussian import IsotropicGaussian
@@ -20,7 +20,7 @@ from .isotropic_gaussian import IsotropicGaussian
 
 class SequentialReparameterizer(nn.Module):
     def __init__(self, reparam_strs, config):
-        """ A simple struct to hold the input and output size
+        """ Sequentially attaches a set of reparameterizations.
 
         :param config: argparse config
         :returns: SequentialReparameterizer object
@@ -35,7 +35,6 @@ class SequentialReparameterizer(nn.Module):
         self.input_size = self.reparameterizers[0].input_size
         self.output_size = self.reparameterizers[-1][-1].output_size \
             if len(self.reparameterizers) > 1 else self.reparameterizers[-1].output_size
-        print("input = ", self.input_size, " |out = ", self.output_size)
 
     def _get_dense_net_map(self, name='dense'):
         """ Internal helper to build a dense network
@@ -66,6 +65,7 @@ class SequentialReparameterizer(nn.Module):
         """
         reparam_dict = {
             'beta': Beta,
+            'bernoulli': Bernoulli,
             'discrete': GumbelSoftmax,
             'isotropic_gaussian': IsotropicGaussian,
             'mixture': partial(Mixture, num_discrete=self.config['discrete_size'],
@@ -104,8 +104,22 @@ class SequentialReparameterizer(nn.Module):
         return reparam_scalar_map
 
 
-    def mutual_info(self, params):
-        raise NotImplementedError("Not implemented mut-info for sequential reparam")
+    def mutual_info(self, dists):
+        """ Adds all the mutual infos together and returns.
+
+        :param dists: a list of distribution params
+        :param priors: a list (or None) of priors, used only in VRNN currently
+        :returns: mut-info of shape [batch_size]
+        :rtype: torch.Tensor
+
+        """
+        mi = None
+        for param, reparam in zip(dists, self.reparameterizers):
+            reparam_obj = reparam[-1] if isinstance(reparam, nn.Sequential) else reparam
+            mi = reparam_obj.mutual_info(param) if mi is None else mi + reparam_obj.mutual_info(param)
+
+        return mi
+
 
     def kl(self, dists, priors=None):
         """ Adds all the KLs together and returns

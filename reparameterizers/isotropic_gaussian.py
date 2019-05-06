@@ -58,6 +58,15 @@ class IsotropicGaussian(nn.Module):
 
         return self._reparametrize_gaussian(mu, sigma)
 
+    def get_reparameterizer_scalars(self):
+        """ Returns any scalars used in reparameterization.
+
+        :returns: dict of scalars
+        :rtype: dict
+
+        """
+        return {}
+
     def mutual_info(self, params, eps=1e-9):
         # I(z_d; x) ~ H(z_prior, z_d) + H(z_prior)
         z_true = D.Normal(params['gaussian']['mu'],

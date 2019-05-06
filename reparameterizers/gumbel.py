@@ -29,6 +29,15 @@ class GumbelSoftmax(nn.Module):
             one_hot(self.output_size, sample, use_cuda=self.config['cuda'])
         ).type(float_type(self.config['cuda']))
 
+    def get_reparameterizer_scalars(self):
+        """ Returns any scalars used in reparameterization.
+
+        :returns: dict of scalars
+        :rtype: dict
+
+        """
+        return {'tau_scalar': self.tau}
+
     def _setup_anneal_params(self):
         # setup the base gumbel rates
         # TODO: parameterize this
