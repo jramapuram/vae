@@ -15,8 +15,8 @@ from .reparameterizers.beta import Beta
 from .reparameterizers.isotropic_gaussian import IsotropicGaussian
 from helpers.distributions import nll_activation as nll_activation_fn
 from helpers.distributions import nll as nll_fn
-from helpers.layers import get_encoder, Identity
-from helpers.utils import eps as eps_fn
+from helpers.layers import get_encoder, get_decoder, Identity
+from helpers.utils import eps as eps_fn, add_noise_to_imgs
 from helpers.utils import same_type, zeros_like, expand_dims, \
     zeros, nan_check_and_break
 
@@ -358,8 +358,7 @@ class VRNN(AbstractVAE):
         )
 
         # decoder
-        self.decoder = self._build_decoder(input_size=self.config['latent_size']*2,
-                                           reupsample=True)
+        self.decoder = self.build_decoder()
 
         # memory module that contains the RNN or DNC
         self.memory = VRNNMemory(h_dim=self.config['latent_size'],
@@ -368,6 +367,24 @@ class VRNN(AbstractVAE):
                                  config=self.config,
                                  rnn=self._lazy_rnn_lambda,
                                  cuda=self.config['cuda'])
+
+    def build_decoder(self, reupsample=True):
+        """ helper function to build convolutional or dense decoder
+
+        :returns: a decoder
+        :rtype: nn.Module
+
+        """
+        if self.config['decoder_layer_type'] == "pixelcnn":
+            assert self.config['nll_type'] == "disc_mix_logistic", \
+                "pixelcnn only works with disc_mix_logistic"
+
+        decoder = get_decoder(self.config, reupsample)(input_size=self.config['latent_size']*2,
+                                                       output_shape=self.input_shape,
+                                                       activation_fn=self.activation_fn,
+                                                       reupsample=True)
+        # append the variance as necessary
+        return self._append_variance_projection(decoder)
 
     def fp16(self):
         """ Helper to convert to FP16 model.
@@ -491,6 +508,54 @@ class VRNN(AbstractVAE):
         }
 
         return z, params
+
+    def forward(self, input_t):
+        """ Multi-step forward pass for VRNN.
+
+        :param input_t: input tensor or list of tensors
+        :returns: final output tensor
+        :rtype: torch.Tensor
+
+        """
+        decoded, params = [], []
+        batch_size = input_t.shape[0] if isinstance(input_t, torch.Tensor) else input_t[0].shape[0]
+
+        self.memory.init_state(batch_size, input_t.is_cuda) # always re-init state at first step.
+        for i in range(self.config['max_time_steps']):
+            if isinstance(input_t, list):  # if we have many inputs as a list
+                decode_i, params_i = self.step(input_t[i])
+            else:                          # single input encoded many times
+                decode_i, params_i = self.step(input_t)
+
+            decoded.append(decode_i)
+            params.append(params_i)
+
+        self.memory.clear()                # clear memory to prevent perennial growth
+        return decoded, params
+
+    def step(self, x_i, inference_only=False):
+        """ Single step forward pass.
+
+        :param x_related: input tensor
+        :param inference_only:
+        :returns:
+        :rtype:
+
+        """
+        x_i_inference = add_noise_to_imgs(x_i) \
+            if self.config['add_img_noise'] else x_i             # add image quantization noise
+        z_t, params_t = self.posterior(x_i_inference)
+        nan_check_and_break(x_i_inference, "x_related_inference")
+        nan_check_and_break(z_t['prior'], "prior")
+        nan_check_and_break(z_t['posterior'], "posterior")
+        nan_check_and_break(z_t['x_features'], "x_features")
+
+        # decode the posterior
+        decoded_t = self.decode(z_t, produce_output=True)
+        nan_check_and_break(decoded_t, "decoded_t")
+
+        return decoded_t, params_t
+
 
     def decode(self, z_t, produce_output=False, reset_state=False):
         """ decodes using VRNN
@@ -771,7 +836,10 @@ class VRNN(AbstractVAE):
         :rtype: dict
 
         """
-        assert len(recon_x_container) == len(x_container) == len(params_map)
+        assert len(recon_x_container) == len(params_map)
+        if len(x_container) != len(recon_x_container): # case where only 1 data sample, but many posteriors
+            x_container = [x_container.clone() for _ in range(len(recon_x_container))]
+
         loss_aggregate_map = None
         for recon_x, x, params in zip(recon_x_container, x_container, params_map):
             mut_info_t = self.mut_info(params)
@@ -780,3 +848,17 @@ class VRNN(AbstractVAE):
             loss_aggregate_map = self._add_loss_map(loss_t, loss_aggregate_map)
 
         return self._mean_map(loss_aggregate_map)
+
+    def get_activated_reconstructions(self, reconstr_container):
+        """ Returns activated reconstruction
+
+        :param reconstr: unactivated reconstr logits list
+        :returns: activated reconstr
+        :rtype: dict
+
+        """
+        recon_dict = {}
+        for i, recon in enumerate(reconstr_container):
+            recon_dict['reconstruction{}_imgs'.format(i)] = self.nll_activation(recon)
+
+        return recon_dict

@@ -483,3 +483,13 @@ class AbstractVAE(nn.Module):
             mut_info = self.reparameterizer.mutual_info(dist_params)
 
         return mut_info
+
+    def get_activated_reconstructions(self, reconstr):
+        """ Returns activated reconstruction
+
+        :param reconstr: unactivated reconstr logits
+        :returns: activated reconstr
+        :rtype: torch.Tensor
+
+        """
+        return {'reconstruction_imgs': self.nll_activation(reconstr)}
