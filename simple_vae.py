@@ -1,5 +1,7 @@
 from __future__ import print_function
 
+from functools import partial
+
 from helpers.layers import str_to_activ_module
 from .reparameterizers.gumbel import GumbelSoftmax
 from .reparameterizers.mixture import Mixture
@@ -27,7 +29,7 @@ class SimpleVAE(AbstractVAE):
             'mixture': partial(Mixture, num_discrete=self.config['discrete_size'],
                                num_continuous=self.config['continuous_size'])
         }
-        self.reparameterizer = reparam_dict[reparam](config=self.config)
+        self.reparameterizer = reparam_dict[self.config['reparam_type']](config=self.config)
 
         # build the encoder and decoder
         self.encoder = self.build_encoder()

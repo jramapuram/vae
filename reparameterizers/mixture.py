@@ -1,8 +1,9 @@
 from __future__ import print_function
 import pprint
 import copy
-import numpy as np
+import warnings
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
@@ -17,6 +18,7 @@ class Mixture(nn.Module):
     ''' continuous + discrete reparaterization '''
     def __init__(self, num_discrete, num_continuous, config, is_beta=False):
         super(Mixture, self).__init__()
+        warnings.warn("\n\nMixture is depricated, use concat_reparam or sequential_reparam.\n")
         self.config = config
         self.is_beta = is_beta
         self.num_discrete_input = num_discrete
@@ -28,6 +30,15 @@ class Mixture(nn.Module):
 
         self.input_size = num_continuous + num_discrete
         self.output_size = self.discrete.output_size + self.continuous.output_size
+
+    def get_reparameterizer_scalars(self):
+        """ Returns any scalars used in reparameterization.
+
+        :returns: dict of scalars
+        :rtype: dict
+
+        """
+        return self.discrete.get_reparameterizer_scalars()
 
     def prior(self, batch_size, **kwargs):
         disc = self.discrete.prior(batch_size, **kwargs)
