@@ -694,16 +694,17 @@ class VRNN(AbstractVAE):
 
         """
         if 'reset_state' in kwargs and kwargs['reset_state']:
-            self.memory.init_state(batch_size, cuda=self.config['cuda'],
-                                   override_noisy_state=True)
+            self.memory.init_state(batch_size, cuda=self.config['cuda'])# ,
+                                   # override_noisy_state=True)
 
         # grab the final state
         final_state = torch.mean(self.memory.get_state()[0], 0)
 
         # reparameterize the prior distribution
-        prior_t = self.prior(final_state.contiguous())
-        prior_t = self._clamp_variance(prior_t)
-        z_prior_t, params_prior_t = self.reparameterizer(prior_t)
+        # prior_t = self.prior(final_state.contiguous())
+        # prior_t = self._clamp_variance(prior_t)
+        # z_prior_t, params_prior_t = self.reparameterizer(prior_t)
+        z_prior_t = self.reparameterizer.prior(batch_size)
 
         # encode prior sample, this contrasts the decoder where
         # the features are run through this network
