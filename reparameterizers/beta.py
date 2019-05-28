@@ -134,7 +134,7 @@ class Beta(nn.Module):
         z_match = PD.Beta(params['q_z_given_xhat']['beta']['conc1'],
                           params['q_z_given_xhat']['beta']['conc2'])
         kl_proxy_to_xent = torch.sum(D.kl_divergence(z_match, z_true), dim=-1)
-        return  kl_proxy_to_xent
+        return self.config['continuous_mut_info'] * kl_proxy_to_xent
 
     def log_likelihood(self, z, params):
         """ Log-likelihood of z induced under params.
@@ -159,4 +159,4 @@ class Beta(nn.Module):
         z, beta_params = self.reparmeterize(logits)
         beta_params['conc1_mean'] = torch.mean(beta_params['conc1'])
         beta_params['conc2_mean'] = torch.mean(beta_params['conc2'])
-        return z, { 'z': z, 'beta':  beta_params }
+        return z, { 'z': z, 'logits': logits, 'beta':  beta_params }

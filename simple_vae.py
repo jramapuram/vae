@@ -43,17 +43,3 @@ class SimpleVAE(AbstractVAE):
 
         """
         return isinstance(self.reparameterizer, GumbelSoftmax)
-
-    def loss_function(self, recon_x, x, params):
-        """ The -ELBO.
-
-        :param recon_x: the (unactivated) reconstruction logits
-        :param x: the original tensor
-        :param params: the reparam dict
-        :returns: loss dict
-        :rtype: dict
-
-        """
-        mut_info = self.mut_info(params)
-        return super(SimpleVAE, self).loss_function(recon_x, x, params,
-                                                    mut_info=mut_info)

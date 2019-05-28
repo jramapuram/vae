@@ -151,7 +151,7 @@ class SequentialReparameterizer(nn.Module):
         params_list = []
         for reparam in self.reparameterizers:
             logits, params = reparam(logits)
-            params_list.append(params)
+            params_list.append({**params, 'logits': logits})
 
         return logits, params_list
 
@@ -166,4 +166,9 @@ class SequentialReparameterizer(nn.Module):
         :rtype: torch.Tensor
 
         """
-        return self.reparameterizers[0].prior(batch_size)
+        prior = self.reparameterizers[0].prior(batch_size)
+        if len(self.reparameterizers) > 1:
+            for reparam in self.reparameterizers[1:]:
+                prior, _ = reparam(prior)
+
+        return prior

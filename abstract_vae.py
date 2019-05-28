@@ -9,7 +9,7 @@ from collections import OrderedDict, Counter
 
 from helpers.pixel_cnn.model import PixelCNN
 from helpers.utils import float_type, zeros, nan_check_and_break, one_hot_np
-from helpers.layers import View, flatten_layers, Identity, \
+from helpers.layers import View, flatten_layers, Identity, EMA, \
     build_pixelcnn_decoder, add_normalization, str_to_activ_module, get_decoder, get_encoder
 from helpers.distributions import nll_activation as nll_activation_fn
 from helpers.distributions import nll as nll_fn
@@ -71,6 +71,9 @@ class AbstractVAE(nn.Module):
         self.chans = 3 if self.is_color else 1
         self.config = kwargs['kwargs']
 
+        # keep track of ammortized posterior
+        self.aggregate_posterior = EMA(0.999)
+
         # grab the activation nn.Module from the string
         self.activation_fn = str_to_activ_module(self.config['activation'])
 
@@ -90,7 +93,12 @@ class AbstractVAE(nn.Module):
         :rtype: nn.Module
 
         """
-        return get_encoder(self.config)(input_shape=self.input_shape,
+        conv_layer_types = ['conv', 'coordconv', 'resnet']
+        input_shape = [self.input_shape[0], 0, 0] if self.config['encoder_layer_type'] \
+            in conv_layer_types else self.input_shape
+
+        # return the encoder
+        return get_encoder(self.config)(input_shape=input_shape,
                                         output_size=self.reparameterizer.input_size,
                                         activation_fn=self.activation_fn)
 
@@ -141,6 +149,8 @@ class AbstractVAE(nn.Module):
             decoder = nn.Sequential(
                 decoder,
                 #self.activation_fn(),
+                #nn.Tanh(),
+                nn.Sigmoid(),
                 self.pixel_cnn
             )
         elif nll_has_variance(self.config['nll_type']):
@@ -209,19 +219,21 @@ class AbstractVAE(nn.Module):
         self.pixel_cnn.eval()
         with torch.no_grad():
             if decoded is None:  # use zeros if no values provided
-                # XXX: hardcoded image shape
-                decoded = zeros(shape=[batch_size, self.chans, 32, 32],
+                decoded = zeros(shape=[batch_size] + self.input_shape,
                                 cuda=self.config['cuda'])
 
-            for i in range(decoded.size(2)):
-                for j in range(decoded.size(3)):
-                    logits = self.pixel_cnn(decoded, sample=True)
-                    out_sample = self.nll_activation(logits)
-                    decoded[:, :, i, j] = out_sample[:, :, i, j]
-                    torch.cuda.synchronize()
+            for i in range(decoded.size(2)):         # y-axis
+                for j in range(decoded.size(3)):     # x-axis
+                    for c in range(decoded.size(1)): # chans
+                        logits = self.pixel_cnn(decoded, sample=True)
+                        out_sample = self.nll_activation(logits)
+                        decoded[:, c, i, j].data = out_sample[:, c, i, j].data
+                        if self.config['cuda']:
+                            torch.cuda.synchronize()
 
-        rescaling_inv = lambda x : .5 * x  + .5
+        rescaling_inv = lambda x : (0.5 * x) + .5
         return rescaling_inv(decoded)
+        # return decoded
 
     def generate_synthetic_samples(self, batch_size, **kwargs):
         """ Generates samples with VAE.
@@ -231,9 +243,15 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor
 
         """
-        z_samples = self.reparameterizer.prior(
-            batch_size, scale_var=self.config['generative_scale_var'], **kwargs
-        )
+        if 'use_aggregate_posterior' in kwargs and kwargs['use_aggregate_posterior']:
+            training_tmp = self.reparameterizer.training
+            self.reparameterizer.train(False)
+            z_samples, _ = self.reparameterize(self.aggregate_posterior.ema_val)
+            self.reparameterizer.train(training_tmp)
+        else:
+            z_samples = self.reparameterizer.prior(
+                    batch_size, scale_var=self.config['generative_scale_var'], **kwargs
+            )
 
         if self.config['decoder_layer_type'] == "pixelcnn":
             # hot-swap the non-pixel CNN for the decoder
@@ -333,22 +351,12 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor, dict
 
         """
-        if self.config['decoder_layer_type'] == 'pixelcnn':
-            rescaling = lambda x : (x - .5) * 2.
-            x = rescaling(x)
-
-        # encode to posterior and then decode
         z, params = self.posterior(x)
-        decoded = self.decode(z)
+        decoded_logits = self.decode(z)
+        params = self._compute_mi_params(decoded_logits, params)
+        return decoded_logits, params
 
-        # and then tentatively invert for pixel_cnn
-        # if self.config['use_pixel_cnn_decoder']:
-        #     rescaling_inv = lambda x : .5 * x  + .5
-        #     decoded = rescaling_inv(decoded)
-
-        return decoded , params
-
-    def loss_function(self, recon_x, x, params, mut_info=None):
+    def loss_function(self, recon_x, x, params):
         """ Produces ELBO, handles mutual info and proxy loss terms too.
 
         :param recon_x: the unactivated reconstruction preds.
@@ -359,33 +367,23 @@ class AbstractVAE(nn.Module):
         :rtype: dict
 
         """
+        if self.config['decoder_layer_type'] == 'pixelcnn':
+            x = (x - .5) * 2.
+
         nll = nll_fn(x, recon_x, self.config['nll_type'])
         nan_check_and_break(nll, "nll")
         kld = self.kld(params)
         nan_check_and_break(kld, "kld")
-        elbo = nll + self.config['kl_beta'] * kld
+        elbo = nll + kld  # save the base ELBO, but use the beta-vae elbo for the full loss
 
         # add the proxy loss if it exists
         proxy_loss = self.reparameterizer.proxy_layer.loss_function() \
             if hasattr(self.reparameterizer, 'proxy_layer') else torch.zeros_like(elbo)
 
         # handle the mutual information term
-        if mut_info is None:
-            mut_info = Variable(
-                float_type(self.config['cuda'])(x.size(0)).zero_()
-            )
-        else:
-            # Clamping strategies
-            mut_clamp_strategy_map = {
-                'none': lambda mut_info: mut_info,
-                'norm': lambda mut_info: mut_info / torch.norm(mut_info, p=2),
-                'clamp': lambda mut_info: torch.clamp(mut_info,
-                                                      min=-self.config['mut_clamp_value'],
-                                                      max=self.config['mut_clamp_value'])
-            }
-            mut_info = mut_clamp_strategy_map[self.config['mut_clamp_strategy'].strip().lower()](mut_info)
+        mut_info = self.mut_info(params, x.size(0))
 
-        loss = elbo - mut_info
+        loss = (nll + self.config['kl_beta'] * kld) - mut_info
         return {
             'loss': loss,
             'loss_mean': torch.mean(loss),
@@ -444,8 +442,11 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor
 
         """
-        z_logits = self.encode(x)
-        return self.reparameterize(z_logits)
+        z_logits = self.encode(x)               # encode logits
+        if self.training:
+            self.aggregate_posterior(z_logits)  # aggregate posterior
+
+        return self.reparameterize(z_logits)    # return reparameterized value
 
     def encode(self, x):
         """ Encodes a tensor x to a set of logits.
@@ -455,6 +456,10 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor
 
         """
+        if self.config['decoder_layer_type'] == 'pixelcnn':
+            x = (x - .5) * 2.
+
+        # print('[ORIG] x max = ', x.max(), " min = ", x.min())
         return self.encoder(x)
 
     def kld(self, dist_a):
@@ -467,7 +472,40 @@ class AbstractVAE(nn.Module):
         """
         return self.reparameterizer.kl(dist_a)
 
-    def mut_info(self, dist_params):
+    def _clamp_mut_info(self, mut_info):
+        """ helper to clamp the mutual information according to a predefined strategy
+
+        :param mut_info: the tensor of mut-info
+        :returns: clamped mut-info
+        :rtype: torch.Tensor
+
+        """
+        mut_clamp_strategy_map = {                # Clamping strategies
+            'none': lambda mut_info: mut_info,
+            'norm': lambda mut_info: mut_info / torch.norm(mut_info, p=2),
+            'clamp': lambda mut_info: torch.clamp(mut_info,
+                                                  min=-self.config['mut_clamp_value'],
+                                                  max=self.config['mut_clamp_value'])
+        }
+        return mut_clamp_strategy_map[self.config['mut_clamp_strategy'].strip().lower()](mut_info)
+
+    def _compute_mi_params(self, recon_x_logits, params):
+        """ Internal helper to compute the MI params and append to full params
+
+        :param recon_x: reconstruction
+        :param params: the original params
+        :returns: original params OR param + MI_params
+        :rtype: dict
+
+        """
+        if self.config['continuous_mut_info'] > 0 or self.config['discrete_mut_info'] > 0:
+            _, q_z_given_xhat_params = self.posterior(self.nll_activation(recon_x_logits))
+            return {**params, 'q_z_given_xhat': q_z_given_xhat_params}
+
+        # base case, no MI
+        return params
+
+    def mut_info(self, dist_params, batch_size):
         """ Returns mutual information between z <-> x
 
         :param dist_params: the distribution dict
@@ -475,12 +513,12 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor
 
         """
-        mut_info = None
+        mut_info = float_type(self.config['cuda'])(batch_size).zero_()
 
         # only grab the mut-info if the scalars above are set
         if (self.config['continuous_mut_info'] > 0
              or self.config['discrete_mut_info'] > 0):
-            mut_info = self.reparameterizer.mutual_info(dist_params)
+            mut_info = self._clamp_mut_info(self.reparameterizer.mutual_info(dist_params))
 
         return mut_info
 

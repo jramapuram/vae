@@ -46,8 +46,8 @@ class Mixture(nn.Module):
         return torch.cat([cont, disc], 1)
 
     def mutual_info(self, params):
-        dinfo = self.config['discrete_mut_info'] * self.discrete.mutual_info(params)
-        cinfo = self.config['continuous_mut_info'] * self.continuous.mutual_info(params)
+        dinfo = self.discrete.mutual_info(params)
+        cinfo = self.continuous.mutual_info(params)
         return dinfo - cinfo
 
     def log_likelihood(self, z, params):
@@ -68,6 +68,7 @@ class Mixture(nn.Module):
         continuous_key = 'gaussian' if not self.is_beta else 'beta'
         params = {continuous_key: continuous_value,
                   'discrete': disc_params['discrete'],
+                  'logits': logits,
                   'z': merged}
         return merged, params
 

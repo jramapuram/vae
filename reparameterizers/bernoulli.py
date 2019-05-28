@@ -124,6 +124,6 @@ class Bernoulli(nn.Module):
         if self.training:
             # return the reparameterization
             # and the params of gumbel
-            return z, { 'z': z, 'discrete': params }
+            return z, { 'z': z, 'logits': logits, 'discrete': params }
 
-        return z_hard, { 'z': z, 'discrete': params }
+        return z_hard, { 'z': z, 'logits': logits, 'discrete': params }

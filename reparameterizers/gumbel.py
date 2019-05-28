@@ -150,7 +150,7 @@ class GumbelSoftmax(nn.Module):
         crossent_loss = -F.cross_entropy(input=params['q_z_given_xhat']['discrete']['logits'],
                                          target=targets, reduce=False)
         ent_loss = -torch.sum(D.OneHotCategorical(logits=params['discrete']['z_hard']).entropy(), -1)
-        return ent_loss + crossent_loss
+        return self.config['discrete_mut_info'] * (ent_loss + crossent_loss)
 
     @staticmethod
     def _kld_categorical_uniform(log_q_z, dim=-1, eps=1e-9):

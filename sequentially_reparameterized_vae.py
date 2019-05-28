@@ -32,16 +32,21 @@ class SequentiallyReparameterizedVAE(AbstractVAE):
         """
         return isinstance(self.reparameterizer.reparameterizers[0], GumbelSoftmax)
 
-    def loss_function(self, recon_x, x, params):
-        """ The -ELBO.
+    def _compute_mi_params(self, recon_x_logits, params_list):
+        """ Internal helper to compute the MI params and append to full params
 
-        :param recon_x: the (unactivated) reconstruction logits
-        :param x: the original tensor
-        :param params: the reparam dict
-        :returns: loss dict
+        :param recon_x: reconstruction
+        :param params: the original params
+        :returns: original params OR param + MI_params
         :rtype: dict
 
         """
-        mut_info = self.mut_info(params)
-        return super(SequentiallyReparameterizedVAE, self).loss_function(recon_x, x, params,
-                                                                         mut_info=mut_info)
+        if self.config['continuous_mut_info'] > 0 or self.config['discrete_mut_info'] > 0:
+            _, q_z_given_xhat_params_list = self.posterior(self.nll_activation(recon_x_logits))
+            for param, q_z_given_xhat in zip(params_list, q_z_given_xhat_params_list):
+                param['q_z_given_xhat'] = q_z_given_xhat
+
+            return params_list
+
+        # base case, no MI
+        return params_list

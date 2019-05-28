@@ -124,7 +124,7 @@ class ConcatReparameterizer(nn.Module):
             #     begin, end, i, self.reparameterizers[i], logits[:, begin:end].shape))
             reparameterized_i, params = self.reparameterizers[i](logits[:, begin:end])
             reparameterized.append(reparameterized_i)
-            params_list.append(params)
+            params_list.append({**params, 'logits': logits[:, begin:end]})
 
         return torch.cat(reparameterized, -1), params_list
 

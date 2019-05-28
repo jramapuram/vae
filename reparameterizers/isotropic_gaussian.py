@@ -110,7 +110,7 @@ class IsotropicGaussian(nn.Module):
         z_match = D.Normal(params['q_z_given_xhat']['gaussian']['mu'],
                            params['q_z_given_xhat']['gaussian']['logvar'])
         kl_proxy_to_xent = torch.sum(D.kl_divergence(z_match, z_true), dim=-1)
-        return kl_proxy_to_xent
+        return self.config['continuous_mut_info'] * kl_proxy_to_xent
 
     @staticmethod
     def _kld_gaussian_N_0_1(mu, logvar):
@@ -169,4 +169,4 @@ class IsotropicGaussian(nn.Module):
         z, gauss_params = self.reparmeterize(logits)
         gauss_params['mu_mean'] = torch.mean(gauss_params['mu'])
         gauss_params['logvar_mean'] = torch.mean(gauss_params['logvar'])
-        return z, { 'z': z, 'gaussian':  gauss_params }
+        return z, { 'z': z, 'logits': logits, 'gaussian':  gauss_params }

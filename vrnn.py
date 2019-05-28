@@ -15,8 +15,8 @@ from .reparameterizers.beta import Beta
 from .reparameterizers.isotropic_gaussian import IsotropicGaussian
 from helpers.distributions import nll_activation as nll_activation_fn
 from helpers.distributions import nll as nll_fn
-from helpers.layers import get_encoder, get_decoder, Identity
-from helpers.utils import eps as eps_fn, add_noise_to_imgs
+from helpers.layers import get_encoder, get_decoder, Identity, EMA
+from helpers.utils import eps as eps_fn, add_noise_to_imgs, float_type
 from helpers.utils import same_type, zeros_like, expand_dims, \
     zeros, nan_check_and_break
 
@@ -257,6 +257,12 @@ class VRNN(AbstractVAE):
                                            is_beta='beta' in self.config['reparam_type'])
         else:
             raise Exception("unknown reparameterization type")
+
+        # keep track of ammortized posterior
+        self.aggregate_posterior = nn.ModuleDict({
+            'encoder_logits': EMA(0.999),
+            'prior_logits': EMA(0.999)
+        })
 
         # build the entire model
         self._build_model()
@@ -526,6 +532,9 @@ class VRNN(AbstractVAE):
                 decode_i, params_i = self.step(input_t[i])
             else:                          # single input encoded many times
                 decode_i, params_i = self.step(input_t)
+                input_t = decode_i if i == 0 else decode_i + input_t
+
+            params_i = self._compute_mi_params(decode_i, params_i)
 
             decoded.append(decode_i)
             params.append(params_i)
@@ -640,6 +649,9 @@ class VRNN(AbstractVAE):
         :rtype: dict
 
         """
+        if self.config['decoder_layer_type'] == 'pixelcnn':
+            x = (x - .5) * 2.
+
         # get the memory trace, TODO: evaluate different recovery methods below
         batch_size = x.size(0)
         final_state = torch.mean(self.memory.get_state()[0], 0)
@@ -704,7 +716,19 @@ class VRNN(AbstractVAE):
         # prior_t = self.prior(final_state.contiguous())
         # prior_t = self._clamp_variance(prior_t)
         # z_prior_t, params_prior_t = self.reparameterizer(prior_t)
-        z_prior_t = self.reparameterizer.prior(batch_size)
+
+        # old working-ish
+        # z_prior_t = self.reparameterizer.prior(batch_size)
+
+        if 'use_aggregate_posterior' in kwargs and kwargs['use_aggregate_posterior']:
+            training_tmp = self.reparameterizer.training # XXX: over-ride training to get some stochasticity
+            self.reparameterizer.train(False)
+            z_prior_t, _ = self.reparameterizer(self.aggregate_posterior['prior_logits'].ema_val)
+            self.reparameterizer.train(training_tmp)
+        else:
+            z_prior_t = self.reparameterizer.prior(
+                batch_size, scale_var=self.config['generative_scale_var'], **kwargs
+            )
 
         # encode prior sample, this contrasts the decoder where
         # the features are run through this network
@@ -714,13 +738,19 @@ class VRNN(AbstractVAE):
         dec_input_t = torch.cat([phi_z_t, final_state], -1)
         dec_output_t = self._decode_pixelcnn_or_normal(dec_input_t)
 
-        # use the decoder output as features to update the RNN
-        phi_x_t = self.phi_x(dec_output_t)
-        input_t = torch.cat([phi_x_t, phi_z_t], -1).unsqueeze(0)
-        self.memory(input_t.contiguous(), reset_state=False)
+        # decoded_list, _ = self(dec_output_t)
+        # return torch.cat(decoded_list, 0)
 
-        # return the activated outputs
-        return dec_output_t
+        decoded_list = [dec_output_t]
+        for _ in range(self.config['max_time_steps'] - 1):
+            dec_output_tp1, _ = self.step(dec_output_t)
+            dec_output_t = dec_output_t + dec_output_tp1
+            decoded_list.append(dec_output_t.clone())
+
+        #return torch.mean(torch.cat([d.unsqueeze(0) for d in decoded_list], 0), 0)
+        # TODO: factor generations for multi-input
+        return torch.cat(decoded_list, 0)
+
 
     def posterior(self, *x_args):
         """ encode the set of input tensor args
@@ -730,6 +760,10 @@ class VRNN(AbstractVAE):
 
         """
         logits_map = self.encode(*x_args)
+        if self.training:
+            self.aggregate_posterior['encoder_logits'](logits_map['encoder_logits'])
+            self.aggregate_posterior['prior_logits'](logits_map['prior_logits'])
+
         return self.reparameterize(logits_map)
 
     def _ensure_same_size(self, prediction_list, target_list):
@@ -771,23 +805,57 @@ class VRNN(AbstractVAE):
             if self.config['use_prior_kl'] is True else 0
         return self.reparameterizer.kl(dist['posterior'], dist['prior']) + prior_kl
 
-    def mut_info(self, dist_params_container):
-        """ helper to get mutual info
+    def _compute_mi_params(self, recon_x_logits, params):
+        """ Internal helper to compute the MI params and append to full params
 
-        :param dist_params_container: the container containing distributions
-        :returns: mutual info
+        :param recon_x: reconstruction
+        :param params: the original params
+        :returns: original params OR param + MI_params
+        :rtype: dict
+
+        """
+        if self.config['continuous_mut_info'] > 0 or self.config['discrete_mut_info'] > 0:
+            _, q_z_given_xhat_params = self.posterior(self.nll_activation(recon_x_logits))
+            params['posterior']['q_z_given_xhat'] = q_z_given_xhat_params['posterior']
+
+        # base case, no MI
+        return params
+
+    def mut_info(self, dist_params, batch_size):
+        """ Returns mutual information between z <-> x
+
+        :param dist_params: the distribution dict
+        :returns: tensor of dimension batch_size
         :rtype: torch.Tensor
 
         """
-        mut_info = None
+        mut_info = float_type(self.config['cuda'])(batch_size).zero_()
+
+        # only grab the mut-info if the scalars above are set
         if (self.config['continuous_mut_info'] > 0
-            or self.config['discrete_mut_info'] > 0):
-            # only grab the mut-info if the scalars above are set
-            mut_info = [self.reparameterizer.mutual_info(params['posterior']).unsqueeze(0)
-                        for params in dist_params_container]
-            mut_info = torch.sum(torch.cat(mut_info, 0), 0)
+             or self.config['discrete_mut_info'] > 0):
+            mut_info = self._clamp_mut_info(self.reparameterizer.mutual_info(dist_params['posterior']))
 
         return mut_info
+
+    # def _compute_mi_params(self, recon_x_logits, params_list):
+    #     """ Internal helper to compute the MI params and append to full params
+
+    #     :param recon_x: reconstruction
+    #     :param params: the original params
+    #     :returns: original params OR param + MI_params
+    #     :rtype: dict
+
+    #     """
+    #     if self.config['continuous_mut_info'] > 0 or self.config['discrete_mut_info'] > 0:
+    #         _, q_z_given_xhat_params_list = self.posterior(self.nll_activation(recon_x_logits))
+    #         for param, q_z_given_xhat in zip(params_list, q_z_given_xhat_params_list):
+    #             param['q_z_given_xhat'] = q_z_given_xhat
+
+    #         return params_list
+
+    #     # base case, no MI
+    #     return params_list
 
     @staticmethod
     def _add_loss_map(loss_t, loss_aggregate_map):
@@ -838,14 +906,17 @@ class VRNN(AbstractVAE):
 
         """
         assert len(recon_x_container) == len(params_map)
-        if len(x_container) != len(recon_x_container): # case where only 1 data sample, but many posteriors
-            x_container = [x_container.clone() for _ in range(len(recon_x_container))]
 
+        # case where only 1 data sample, but many posteriors
+        if not isinstance(x_container, list) and len(x_container) != len(recon_x_container):
+            scale = 1.0 / len(recon_x_container)
+            x_container = [scale * x_container.clone() for _ in range(len(recon_x_container))]
+            recon_x_container = [scale * recon_x_container[-1].clone() for _ in range(len(recon_x_container))]
+
+        # aggregate the loss many and return the mean of the map
         loss_aggregate_map = None
         for recon_x, x, params in zip(recon_x_container, x_container, params_map):
-            mut_info_t = self.mut_info(params)
-            loss_t = super(VRNN, self).loss_function(recon_x, x, params,
-                                                     mut_info=mut_info_t)
+            loss_t = super(VRNN, self).loss_function(recon_x, x, params)
             loss_aggregate_map = self._add_loss_map(loss_t, loss_aggregate_map)
 
         return self._mean_map(loss_aggregate_map)
