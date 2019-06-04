@@ -47,4 +47,4 @@ class ParallellyReparameterizedVAE(AbstractVAE):
         :rtype: bool
 
         """
-        return isinstance(self.reparameterizer.reparameterizers[0], GumbelSoftmax)
+        return isinstance(self.reparameterizer.reparameterizers[0], (GumbelSoftmax, Mixture))

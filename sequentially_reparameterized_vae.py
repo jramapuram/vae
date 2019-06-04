@@ -30,7 +30,7 @@ class SequentiallyReparameterizedVAE(AbstractVAE):
         :rtype: bool
 
         """
-        return isinstance(self.reparameterizer.reparameterizers[0], GumbelSoftmax)
+        return isinstance(self.reparameterizer.reparameterizers[0], (GumbelSoftmax, Mixture))
 
     def _compute_mi_params(self, recon_x_logits, params_list):
         """ Internal helper to compute the MI params and append to full params

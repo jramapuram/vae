@@ -421,14 +421,13 @@ class VRNN(AbstractVAE):
         #self.memory.model = nn.DataParallel(self.memory.model)
 
     def has_discrete(self):
-        """ True is we have a discrete reparameterization
+        """ Returns true if there is a discrete reparameterization.
 
         :returns: True/False
         :rtype: bool
 
         """
-        return self.config['reparam_type'] == 'mixture' \
-            or self.config['reparam_type'] == 'discrete'
+        return isinstance(self.reparameterizer, (GumbelSoftmax, Mixture))
 
     def _build_rnn_memory_model(self, input_size, model_type='lstm', bias=True, dropout=0):
         """ Builds an RNN Memory Model. Currently restricted to LSTM.

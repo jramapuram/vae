@@ -42,4 +42,4 @@ class SimpleVAE(AbstractVAE):
         :rtype: bool
 
         """
-        return isinstance(self.reparameterizer, GumbelSoftmax)
+        return isinstance(self.reparameterizer, (GumbelSoftmax, Mixture))

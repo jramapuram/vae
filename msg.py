@@ -65,7 +65,7 @@ class MSGVAE(AbstractVAE):
         :rtype: bool
 
         """
-        return isinstance(self.reparameterizer, GumbelSoftmax)
+        return isinstance(self.reparameterizer, (GumbelSoftmax, Mixture))
 
     def kld(self, dist_list):
         """ KL-Divergence of the distribution dict and the prior of that distribution.
