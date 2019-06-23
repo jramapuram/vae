@@ -261,7 +261,9 @@ class VRNN(AbstractVAE):
         # keep track of ammortized posterior
         self.aggregate_posterior = nn.ModuleDict({
             'encoder_logits': EMA(0.999),
-            'prior_logits': EMA(0.999)
+            'prior_logits': EMA(0.999),
+            'rnn_hidden_state_h': EMA(0.999),
+            'rnn_hidden_state_c': EMA(0.999)
         })
 
         # build the entire model
@@ -493,8 +495,8 @@ class VRNN(AbstractVAE):
         :rtype: dict
 
         """
-        # nan_check_and_break(logits_map['encoder_logits'], "enc_logits")
-        # nan_check_and_break(logits_map['prior_logits'], "prior_logits")
+        nan_check_and_break(logits_map['encoder_logits'], "enc_logits")
+        nan_check_and_break(logits_map['prior_logits'], "prior_logits")
         z_enc_t, params_enc_t = self.reparameterizer(logits_map['encoder_logits'])
 
         # XXX: clamp the variance of gaussian priors to not explode
@@ -503,12 +505,12 @@ class VRNN(AbstractVAE):
         # reparamterize the prior distribution
         z_prior_t, params_prior_t = self.reparameterizer(logits_map['prior_logits'])
 
-        z = {  # reparameterization
+        z = {      # reparameterization
             'prior': z_prior_t,
             'posterior': z_enc_t,
             'x_features': logits_map['x_features']
         }
-        params = {  # params of the posterior
+        params = {  # params of the reparameterization
             'prior': params_prior_t,
             'posterior': params_enc_t
         }
@@ -529,49 +531,56 @@ class VRNN(AbstractVAE):
         self.memory.init_state(batch_size, input_t.is_cuda) # always re-init state at first step.
         for i in range(self.config['max_time_steps']):
             if isinstance(input_t, list):  # if we have many inputs as a list
-                decode_i, params_i = self.step(input_t[i])
+                decode_t, params_t = self.step(input_t[i])
             else:                          # single input encoded many times
-                decode_i, params_i = self.step(input_t)
-                input_t = decode_i if i == 0 else decode_i + input_t
+                decode_t, params_t = self.step(input_t)
+                input_t = decode_t
 
-            params_i = self._compute_mi_params(decode_i, params_i)
+            if self.training and i == 0:
+                self.aggregate_posterior['rnn_hidden_state_h'](self.memory.get_state()[0])
+                self.aggregate_posterior['rnn_hidden_state_c'](self.memory.get_state()[1])
 
-            decoded.append(decode_i)
-            params.append(params_i)
+            # append mutual information if requested
+            params_t = self._compute_mi_params(decode_t, params_t)
+
+            # add the params and the input to the list
+            decoded.append(decode_t.clone())
+            params.append(params_t)
 
         self.memory.clear()                # clear memory to prevent perennial growth
         return decoded, params
 
-    def step(self, x_i, inference_only=False):
+    def step(self, x_t, inference_only=False, **kwargs):
         """ Single step forward pass.
 
-        :param x_related: input tensor
-        :param inference_only:
-        :returns:
-        :rtype:
+        :param x_i: the input tensor for time t
+        :param inference_only: whether or not to run the decoding process
+        :returns: decoded for current time and params for current time
+        :rtype: torch.Tensor, torch.Tensor
 
         """
-        x_i_inference = add_noise_to_imgs(x_i) \
-            if self.config['add_img_noise'] else x_i             # add image quantization noise
-        z_t, params_t = self.posterior(x_i_inference)
-        nan_check_and_break(x_i_inference, "x_related_inference")
+        x_t_inference = add_noise_to_imgs(x_t) \
+            if self.config['add_img_noise'] else x_t     # add image quantization noise
+        z_t, params_t = self.posterior(x_t_inference)
+
+        # sanity checks
+        nan_check_and_break(x_t_inference, "x_related_inference")
         nan_check_and_break(z_t['prior'], "prior")
         nan_check_and_break(z_t['posterior'], "posterior")
         nan_check_and_break(z_t['x_features'], "x_features")
 
-        # decode the posterior
-        decoded_t = self.decode(z_t, produce_output=True)
-        nan_check_and_break(decoded_t, "decoded_t")
+        if not inference_only:                           # decode the posterior
+            decoded_t = self.decode(z_t, produce_output=True)
+            nan_check_and_break(decoded_t, "decoded_t")
+            return decoded_t, params_t
 
-        return decoded_t, params_t
+        return None, params_t
 
-
-    def decode(self, z_t, produce_output=False, reset_state=False):
+    def decode(self, z_t, produce_output=False, update_memory=True):
         """ decodes using VRNN
 
         :param z_t: the latent sample
         :param produce_output: produce output or just update stae
-        :param reset_state: reset the state of the RNN
         :returns: decoded logits
         :rtype: torch.Tensor
 
@@ -579,15 +588,17 @@ class VRNN(AbstractVAE):
         # grab state from RNN, TODO: evaluate recovery methods below
         # [0] grabs the h from LSTM (as opposed to (h, c))
         final_state = torch.mean(self.memory.get_state()[0], 0)
-        # nan_check_and_break(final_state, "final_rnn_output[decode]")
 
         # feature transform for z_t
         phi_z_t = self.phi_z(z_t['posterior'])
-        # nan_check_and_break(phi_z_t, "phi_z_t")
 
-        # concat and run through RNN to update state
-        input_t = torch.cat([z_t['x_features'], phi_z_t], -1).unsqueeze(0)
-        self.memory(input_t.contiguous(), reset_state=reset_state)
+        # sanity checks
+        nan_check_and_break(final_state, "final_rnn_output[decode]")
+        nan_check_and_break(phi_z_t, "phi_z_t")
+
+        if update_memory: # concat and run through RNN to update state
+            input_t = torch.cat([z_t['x_features'], phi_z_t], -1).unsqueeze(0)
+            self.memory(input_t.contiguous())
 
         # decode only if flag is set
         dec_t = None
@@ -663,10 +674,12 @@ class VRNN(AbstractVAE):
         # encoder projection
         enc_input_t = torch.cat([phi_x_t, final_state], dim=-1)
         enc_t = self._lazy_build_encoder(enc_input_t.size(-1))(enc_input_t)
-        nan_check_and_break(enc_t, "enc_t")
 
         # prior projection , consider: + eps_fn(self.config['cuda']))
         prior_t = self.prior(final_state.contiguous())
+
+        # sanity checks
+        nan_check_and_break(enc_t, "enc_t")
         nan_check_and_break(prior_t, "priot_t")
 
         return {
@@ -675,7 +688,7 @@ class VRNN(AbstractVAE):
             'x_features': phi_x_t
         }
 
-    def _decode_pixelcnn_or_normal(self, dec_input_t):
+    def _decode_pixelcnn_or_normal_and_activate(self, dec_input_t):
         """ helper to decode using the pixel-cnn or normal decoder
 
         :param dec_input_t: input decoded tensor (unactivated)
@@ -684,18 +697,42 @@ class VRNN(AbstractVAE):
 
         """
         if self.config['decoder_layer_type'] == "pixelcnn":
-            # hot-swap the non-pixel CNN for the decoder
-            full_decoder = self.decoder
-            trunc_decoder = self.decoder[0:-1]
+            # decode the synthetic samples through the base decoder
+            decoded = self.decoder(dec_input_t)
+            return self.generate_pixel_cnn(batch_size, decoded)
 
-            # decode the synthetic samples using non-pCNN
-            decoded = trunc_decoder(dec_input_t)
+        # in the normal case just decode and activate
+        return self.nll_activation(self.decoder(dec_input_t))
 
-            # then decode with the pCNN
-            return self.generate_pixel_cnn(dec_input_t.size(0), decoded)
 
-        dec_logits_t = self.decoder(dec_input_t)
-        return self.nll_activation(dec_logits_t)
+    def _get_prior_and_state(self, batch_size, **kwargs):
+        """ Internal helper to get the final memory state and prior samples.
+
+        :param batch_size: the number of samples to generate
+        :returns: state and prior
+        :rtype: (torch.Tensor, torch.Tensor)
+
+        """
+        if 'use_aggregate_posterior' in kwargs and kwargs['use_aggregate_posterior']:
+            final_state = torch.mean(self.aggregate_posterior['rnn_hidden_state_h'].ema_val, 0)
+            self.memory.state = (self.aggregate_posterior['rnn_hidden_state_h'].ema_val,
+                                 self.aggregate_posterior['rnn_hidden_state_c'].ema_val)
+            # XXX: over-ride training to get some stochasticity
+            training_tmp = self.reparameterizer.training
+            self.reparameterizer.train(True)
+
+            # grab the prior using the exponential moving average.
+            z_prior_t, _ = self.reparameterizer(self.aggregate_posterior['prior_logits'].ema_val)
+
+            # XXX: reset training state to reparameterizer
+            self.reparameterizer.train(training_tmp)
+        else:
+            final_state = torch.mean(self.memory.get_state()[0], 0)
+            z_prior_t = self.reparameterizer.prior(
+                batch_size, scale_var=self.config['generative_scale_var'], **kwargs
+            )
+
+        return final_state, z_prior_t
 
     def generate_synthetic_samples(self, batch_size, **kwargs):
         """ generate batch_size samples.
@@ -708,49 +745,21 @@ class VRNN(AbstractVAE):
         if 'reset_state' in kwargs and kwargs['reset_state']:
             self.memory.init_state(batch_size, cuda=self.config['cuda'])# ,
                                    # override_noisy_state=True)
-
-        # grab the final state
-        final_state = torch.mean(self.memory.get_state()[0], 0)
-
-        # reparameterize the prior distribution
-        # prior_t = self.prior(final_state.contiguous())
-        # prior_t = self._clamp_variance(prior_t)
-        # z_prior_t, params_prior_t = self.reparameterizer(prior_t)
-
-        # old working-ish
-        # z_prior_t = self.reparameterizer.prior(batch_size)
-
-        if 'use_aggregate_posterior' in kwargs and kwargs['use_aggregate_posterior']:
-            training_tmp = self.reparameterizer.training # XXX: over-ride training to get some stochasticity
-            self.reparameterizer.train(False)
-            z_prior_t, _ = self.reparameterizer(self.aggregate_posterior['prior_logits'].ema_val)
-            self.reparameterizer.train(training_tmp)
-        else:
-            z_prior_t = self.reparameterizer.prior(
-                batch_size, scale_var=self.config['generative_scale_var'], **kwargs
-            )
-
-        # encode prior sample, this contrasts the decoder where
-        # the features are run through this network
+        # grab final state and prior samples & encode them through feature extractor
+        final_state, z_prior_t = self._get_prior_and_state(batch_size, **kwargs)
         phi_z_t = self.phi_z(z_prior_t)
 
-        # construct decoder inputs and process
+        # run the first step of the decoding process using the prior
         dec_input_t = torch.cat([phi_z_t, final_state], -1)
-        dec_output_t = self._decode_pixelcnn_or_normal(dec_input_t)
+        dec_output_t = self._decode_pixelcnn_or_normal_and_activate(dec_input_t)
+        decoded_list = [dec_output_t.clone()]
 
-        # decoded_list, _ = self(dec_output_t)
-        # return torch.cat(decoded_list, 0)
-
-        decoded_list = [dec_output_t]
+        # iterate max_time_steps -1  times using the output from above
         for _ in range(self.config['max_time_steps'] - 1):
-            dec_output_tp1, _ = self.step(dec_output_t)
-            dec_output_t = dec_output_t + dec_output_tp1
+            dec_output_t, _ = self.step(dec_output_t, **kwargs)
             decoded_list.append(dec_output_t.clone())
 
-        #return torch.mean(torch.cat([d.unsqueeze(0) for d in decoded_list], 0), 0)
-        # TODO: factor generations for multi-input
         return torch.cat(decoded_list, 0)
-
 
     def posterior(self, *x_args):
         """ encode the set of input tensor args
@@ -838,25 +847,6 @@ class VRNN(AbstractVAE):
 
         return mut_info
 
-    # def _compute_mi_params(self, recon_x_logits, params_list):
-    #     """ Internal helper to compute the MI params and append to full params
-
-    #     :param recon_x: reconstruction
-    #     :param params: the original params
-    #     :returns: original params OR param + MI_params
-    #     :rtype: dict
-
-    #     """
-    #     if self.config['continuous_mut_info'] > 0 or self.config['discrete_mut_info'] > 0:
-    #         _, q_z_given_xhat_params_list = self.posterior(self.nll_activation(recon_x_logits))
-    #         for param, q_z_given_xhat in zip(params_list, q_z_given_xhat_params_list):
-    #             param['q_z_given_xhat'] = q_z_given_xhat
-
-    #         return params_list
-
-    #     # base case, no MI
-    #     return params_list
-
     @staticmethod
     def _add_loss_map(loss_t, loss_aggregate_map):
         """ helper to add two maps and keep counts
@@ -909,9 +899,7 @@ class VRNN(AbstractVAE):
 
         # case where only 1 data sample, but many posteriors
         if not isinstance(x_container, list) and len(x_container) != len(recon_x_container):
-            scale = 1.0 / len(recon_x_container)
-            x_container = [scale * x_container.clone() for _ in range(len(recon_x_container))]
-            recon_x_container = [scale * recon_x_container[-1].clone() for _ in range(len(recon_x_container))]
+            x_container = [x_container.clone() for _ in range(len(recon_x_container))]
 
         # aggregate the loss many and return the mean of the map
         loss_aggregate_map = None

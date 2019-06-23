@@ -1,14 +1,17 @@
 from __future__ import print_function
 import pprint
 import functools
+import warnings
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from copy import deepcopy
 from torch.autograd import Variable
 from collections import OrderedDict, Counter
 
 from helpers.pixel_cnn.model import PixelCNN
-from helpers.utils import float_type, zeros, nan_check_and_break, one_hot_np
+from helpers.utils import same_type, zeros, nan_check_and_break, one_hot_np, get_dtype
 from helpers.layers import View, flatten_layers, Identity, EMA, \
     build_pixelcnn_decoder, add_normalization, str_to_activ_module, get_decoder, get_encoder
 from helpers.distributions import nll_activation as nll_activation_fn
@@ -123,8 +126,9 @@ class AbstractVAE(nn.Module):
 
         """
         if self.config['decoder_layer_type'] == "pixelcnn":
-            assert self.config['nll_type'] == "disc_mix_logistic", \
-                "pixelcnn only works with disc_mix_logistic"
+            assert self.config['nll_type'] == "disc_mix_logistic" \
+                or self.config['nll_type'] == "log_logistic_256", \
+                "pixelcnn only works with disc_mix_logistic or log_logistic_256"
 
         decoder = get_decoder(self.config, reupsample)(input_size=self.reparameterizer.output_size,
                                                        output_shape=self.input_shape,
@@ -140,27 +144,40 @@ class AbstractVAE(nn.Module):
         :rtype: nn.Module
 
         """
-
         if self.config['decoder_layer_type'] == "pixelcnn":
             # pixel CNN already accounts for variance internally
-            self.pixel_cnn = PixelCNN(input_channels=self.chans,
-                                      nr_resnet=2, nr_filters=40,
-                                      nr_logistic_mix=10)
-            decoder = nn.Sequential(
-                decoder,
-                #self.activation_fn(),
-                #nn.Tanh(),
-                nn.Sigmoid(),
-                self.pixel_cnn
-            )
+            if self.config['nll_type'] == "disc_mix_logistic":
+                decoder_output_channels = self.chans + self.chans + 4 \
+                    if self.config['vae_type'] != 'vrnn' else 2*self.chans
+                self.pixel_cnn = PixelCNN(input_channels=decoder_output_channels,
+                                          nr_resnet=2, nr_filters=40,
+                                          nr_logistic_mix=10)
+
+                #self.pixel_cnn = build_pixelcnn_decoder(input_size=self.chans + self.chans+4,
+                decoder = nn.Sequential(
+                    decoder,
+                    # nn.Conv2d(self.chans, 2*self.chans, 1, stride=1, bias=False)
+                    # nn.ConvTranspose2d(self.chans, self.chans+4, 1, stride=1, bias=False)
+                    nn.Conv2d(self.chans, decoder_output_channels - self.chans, 1, stride=1, bias=False),
+                    nn.Tanh()
+                )
+            elif self.config['nll_type'] == "log_logistic_256":
+                output_shape = deepcopy(self.input_shape)
+                output_shape[0] *= 2
+                self.pixel_cnn = build_pixelcnn_decoder(input_size=2*self.chans,
+                                                        output_shape=output_shape,
+                                                        filter_depth=self.config['filter_depth'],
+                                                        activation_fn=self.activation_fn,
+                                                        normalization_str=self.config['conv_normalization'])
         elif nll_has_variance(self.config['nll_type']):
             # add the variance projector (if we are in that case for the NLL)
-            print("adding variance projector for {} log-likelihood".format(self.config['nll_type']))
-            decoder = nn.Sequential(
-                decoder,
-                # TODO: if you need variance on the decoded distribution use the following:
-                # VarianceProjector(self.input_shape, self.activation_fn, self.config)
-            )
+            warnings.warn("\nCurrently variance is not being added to p(x|z)\ --> using mean. \n")
+            # print("adding variance projector for {} log-likelihood".format(self.config['nll_type']))
+            # decoder = nn.Sequential(
+            #     decoder,
+            #     # TODO: if you need variance on the decoded distribution use the following:
+            #     # VarianceProjector(self.input_shape, self.activation_fn, self.config)
+            # )
 
         return decoder
 
@@ -172,13 +189,9 @@ class AbstractVAE(nn.Module):
 
         """
         self.encoder = self.encoder.half()
+        self.decoder = self.decoder.half()
         if self.config['decoder_layer_type'] == "pixelcnn":
-            self.decoder = nn.Sequential(
-                self.decoder[0:-1].half(),
-                self.decoder[-1].half()
-            )
-        else:
-            self.decoder = self.decoder.half()
+            self.pixel_cnn = self.pixel_cnn.half()
 
     def parallel(self):
         """ DataParallel this module
@@ -188,13 +201,9 @@ class AbstractVAE(nn.Module):
 
         """
         self.encoder = nn.DataParallel(self.encoder)
+        self.decoder = nn.DataParallel(self.decoder)
         if self.config['decoder_layer_type'] == "pixelcnn":
-            self.decoder = nn.Sequential(
-                nn.DataParallel(self.decoder[0:-1]),
-                nn.DataParallel(self.decoder[-1])
-            )
-        else:
-            self.decoder = nn.DataParallel(self.decoder)
+            self.pixel_cnn = nn.DataParallel(self.pixel_cnn)
 
     def compile_full_model(self):
         """ Takes all the submodules and module-lists
@@ -207,7 +216,7 @@ class AbstractVAE(nn.Module):
         full_model_list, _ = flatten_layers(self)
         return nn.Sequential(OrderedDict(full_model_list))
 
-    def generate_pixel_cnn(self, batch_size, decoded=None):
+    def generate_pixel_cnn(self, batch_size, decoded):
         """ Generates auto-regressively.
 
         :param batch_size: batch size for generations
@@ -218,22 +227,70 @@ class AbstractVAE(nn.Module):
         """
         self.pixel_cnn.eval()
         with torch.no_grad():
-            if decoded is None:  # use zeros if no values provided
-                decoded = zeros(shape=[batch_size] + self.input_shape,
-                                cuda=self.config['cuda'])
+            # initial generation is full of zeros
+            generated = zeros([batch_size] + self.input_shape,
+                              cuda=decoded.is_cuda, dtype=get_dtype(decoded))
 
             for i in range(decoded.size(2)):         # y-axis
                 for j in range(decoded.size(3)):     # x-axis
-                    for c in range(decoded.size(1)): # chans
-                        logits = self.pixel_cnn(decoded, sample=True)
-                        out_sample = self.nll_activation(logits)
-                        decoded[:, c, i, j].data = out_sample[:, c, i, j].data
-                        if self.config['cuda']:
-                            torch.cuda.synchronize()
+                    # for c in range(decoded.size(1)): # chans
+                    #for c in range(self.chans): # chans
+                        # logits = self.pixel_cnn(torch.cat([decoded, generated], 1), sample=True)
+                        # logits = self.pixel_cnn(torch.cat([generated, decoded], 1), sample=True)
 
-        rescaling_inv = lambda x : (0.5 * x) + .5
-        return rescaling_inv(decoded)
-        # return decoded
+                        # compute forward pass and split into mean and var
+                        logits = self.pixel_cnn(torch.cat([generated, decoded], 1))
+                        assert logits.shape[1] % 2 == 0, "logits need to have variance"
+                        num_half_chans = logits.size(1) // 2
+                        logits_mu = torch.clamp(
+                            torch.sigmoid(logits[:, 0:num_half_chans, :, :]), min=0.+1./512., max=1.-1./512.
+                        )
+                        logits_logvar = F.hardtanh(logits[:, num_half_chans:, :, :], min_val=-4.5, max_val=0.)
+
+                        # use the (i, j) element to compute sample update
+                        means = logits_mu[:, :, i, j]
+                        logvar = logits_logvar[:, :, i, j]
+                        # means = logits_mu[:, c, i, j]
+                        # logvar = logits_logvar[:, c, i, j]
+                        #u = same_type(self.config['half'], decoded.is_cuda)(means.size()).rand()
+                        u = torch.rand(means.size())
+                        if decoded.is_cuda:
+                            u = u.cuda()
+
+                        y = torch.log(u) - torch.log(1.0 - u)
+                        sample = means + torch.exp(logvar) * y
+                        bin_size = 1.0 / 256.0
+                        generated[:, :, i, j] = torch.floor(sample / bin_size) * bin_size
+                        # generated[:, c, i, j] = torch.floor(sample / bin_size) * bin_size
+
+                        # logits = self.pixel_cnn(torch.cat([decoded, generated], 1))
+                        # out_sample = self.nll_activation(logits)
+                        # generated[:, c, i, j] = out_sample[:, c, i, j]
+                        # generated[:, :, i, j] = out_sample[:, :, i, j]
+
+                        # if decoded.is_cuda:
+                        #     torch.cuda.synchronize()
+
+        # rescaling_inv = lambda x : (0.5 * x) + .5
+        # return rescaling_inv(generated)
+        # return generated
+        #return torch.sigmoid(samples_gen)
+        #return samples_gen
+        return generated
+        # return torch.sigmoid(logits[:, 0:num_half_chans, :, :])
+
+    def reparameterize_aggregate_posterior(self):
+        """ Gets reparameterized aggregate posterior samples
+
+        :returns: reparameterized tensor
+        :rtype: torch.Tensor
+
+        """
+        training_tmp = self.reparameterizer.training
+        self.reparameterizer.train(True)
+        z_samples, _ = self.reparameterize(self.aggregate_posterior.ema_val)
+        self.reparameterizer.train(training_tmp)
+        return z_samples
 
     def generate_synthetic_samples(self, batch_size, **kwargs):
         """ Generates samples with VAE.
@@ -244,26 +301,15 @@ class AbstractVAE(nn.Module):
 
         """
         if 'use_aggregate_posterior' in kwargs and kwargs['use_aggregate_posterior']:
-            training_tmp = self.reparameterizer.training
-            self.reparameterizer.train(False)
-            z_samples, _ = self.reparameterize(self.aggregate_posterior.ema_val)
-            self.reparameterizer.train(training_tmp)
+            z_samples = self.reparameterize_aggregate_posterior()
         else:
             z_samples = self.reparameterizer.prior(
                     batch_size, scale_var=self.config['generative_scale_var'], **kwargs
             )
 
         if self.config['decoder_layer_type'] == "pixelcnn":
-            # hot-swap the non-pixel CNN for the decoder
-            full_decoder = self.decoder
-            trunc_decoder = self.decoder[0:-1]
-            self.decoder = trunc_decoder
-
-            # decode the synthetic samples
-            decoded = self.decode(z_samples)
-
-            # swap back the decoder and run the pixelcnn
-            self.decoder = full_decoder
+            # decode the synthetic samples through the base decoder
+            decoded = self.decoder(z_samples)
             return self.generate_pixel_cnn(batch_size, decoded)
 
         # in the normal case just decode and activate
@@ -296,7 +342,7 @@ class AbstractVAE(nn.Module):
                 one_hot_np(self.reparameterizer.config['discrete_size'],
                            discrete_indices))
             )
-            z_samples = z_samples.type(float_type(self.config['cuda']))
+            z_samples = z_samples.type(same_type(self.config['half'], self.config['cuda']))
 
             if self.config['reparam_type'] == 'mixture' and self.config['vae_type'] != 'sequential':
                 ''' add in the gaussian prior '''
@@ -352,7 +398,7 @@ class AbstractVAE(nn.Module):
 
         """
         z, params = self.posterior(x)
-        decoded_logits = self.decode(z)
+        decoded_logits = self.decode(z, x=x)
         params = self._compute_mi_params(decoded_logits, params)
         return decoded_logits, params
 
@@ -367,14 +413,17 @@ class AbstractVAE(nn.Module):
         :rtype: dict
 
         """
-        if self.config['decoder_layer_type'] == 'pixelcnn':
-            x = (x - .5) * 2.
+        # if self.config['decoder_layer_type'] == 'pixelcnn':
+        #     #x = (x - .5) * 2.
+        #     x = (x + .5) / 256.
 
         nll = nll_fn(x, recon_x, self.config['nll_type'])
-        nan_check_and_break(nll, "nll")
         kld = self.kld(params)
-        nan_check_and_break(kld, "kld")
         elbo = nll + kld  # save the base ELBO, but use the beta-vae elbo for the full loss
+
+        # sanity checks
+        nan_check_and_break(nll, "nll")
+        nan_check_and_break(kld, "kld")
 
         # add the proxy loss if it exists
         proxy_loss = self.reparameterizer.proxy_layer.loss_function() \
@@ -424,7 +473,7 @@ class AbstractVAE(nn.Module):
         """
         return self.reparameterizer(logits)
 
-    def decode(self, z):
+    def decode(self, z, x=None):
         """ Decode a latent z back to x.
 
         :param z: the latent tensor.
@@ -432,7 +481,23 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor
 
         """
-        return self.decoder(z.contiguous())
+        decoded_logits = self.decoder(z.contiguous())
+        if self.config['decoder_layer_type'] == "pixelcnn":
+            assert x is not None, "need x for decoding pixelcnn"
+            # return self.pixel_cnn(
+            #     #torch.cat([decoded_logits, x], 1), sample=False
+            #     torch.cat([x, decoded_logits], 1), sample=False
+            # )
+
+            # print('decoded = ', decoded_logits.shape, ' x = ', x.shape)
+            return self.pixel_cnn(
+                #torch.cat([decoded_logits, x], 1),
+                torch.cat([x, decoded_logits], 1),
+            )
+            # print('logits.shape = ', logits.shape)
+            # exit(0)
+
+        return decoded_logits
 
     def posterior(self, x):
         """ get a reparameterized Q(z|x) for a given x
@@ -457,7 +522,8 @@ class AbstractVAE(nn.Module):
 
         """
         if self.config['decoder_layer_type'] == 'pixelcnn':
-            x = (x - .5) * 2.
+            # x = (x - .5) * 2.
+            x = (x + .5) / 256.0
 
         # print('[ORIG] x max = ', x.max(), " min = ", x.min())
         return self.encoder(x)
@@ -513,7 +579,7 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor
 
         """
-        mut_info = float_type(self.config['cuda'])(batch_size).zero_()
+        mut_info = same_type(self.config['half'], self.config['cuda'])(batch_size).zero_()
 
         # only grab the mut-info if the scalars above are set
         if (self.config['continuous_mut_info'] > 0
@@ -530,4 +596,8 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor
 
         """
+        # if self.config['decoder_layer_type'] == "pixelcnn":
+        #     rescaling_inv = lambda x : (0.5 * x) + .5
+        #     return {'reconstruction_imgs': rescaling_inv(self.nll_activation(reconstr))}
+
         return {'reconstruction_imgs': self.nll_activation(reconstr)}

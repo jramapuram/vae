@@ -58,15 +58,6 @@ class MSGVAE(AbstractVAE):
         """
         return [self.single_prior(batch_size, **kwargs) for _ in range(self.config['max_time_steps'])]
 
-    def has_discrete(self):
-        """ Returns true if there is a discrete reparameterization.
-
-        :returns: True/False
-        :rtype: bool
-
-        """
-        return isinstance(self.reparameterizer, GumbelSoftmax)
-
     def kld(self, dist_list):
         """ KL-Divergence of the distribution dict and the prior of that distribution.
             NOTE: we use the last one because we calculate the analytical KL divergence
@@ -97,7 +88,7 @@ class MSGVAE(AbstractVAE):
         # return zip(*[self.reparameterizer(logits)
         #              for _ in range(self.config['max_time_steps'])])
 
-    def decode(self, z):
+    def decode(self, z, x=None):
         """ Decode a set of latent z back to x_mean.
 
         :param z: the latent tensor.
