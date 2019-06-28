@@ -55,12 +55,12 @@ class Mixture(nn.Module):
         disc = self.discrete.log_likelihood(z[:, self.continuous.output_size:], params)
         return torch.cat([cont, disc], 1)
 
-    def reparmeterize(self, logits):
+    def reparmeterize(self, logits, force=False):
         continuous_logits = logits[:, 0:self.num_continuous_input]
         discrete_logits = logits[:, self.num_continuous_input:]
 
-        continuous_reparam, continuous_params = self.continuous(continuous_logits)
-        discrete_reparam, disc_params = self.discrete(discrete_logits)
+        continuous_reparam, continuous_params = self.continuous(continuous_logits, force=force)
+        discrete_reparam, disc_params = self.discrete(discrete_logits, force=force)
         merged = torch.cat([continuous_reparam, discrete_reparam], -1)
 
         # use a separate key for gaussian or beta
@@ -78,5 +78,5 @@ class Mixture(nn.Module):
         assert continuous_kl.shape == disc_kl.shape, "need to reduce kl to [#batch] before mixture"
         return continuous_kl + disc_kl
 
-    def forward(self, logits):
-        return self.reparmeterize(logits)
+    def forward(self, logits, force=False):
+        return self.reparmeterize(logits, force=force)

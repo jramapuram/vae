@@ -108,7 +108,7 @@ class ConcatReparameterizer(nn.Module):
 
         return kl
 
-    def reparameterize(self, logits):
+    def reparameterize(self, logits, force=False):
         """ execute the reparameterization layer-by-layer returning ALL params and last reparam logits.
 
         :param logits: the input logits
@@ -122,14 +122,14 @@ class ConcatReparameterizer(nn.Module):
         for i, (begin, end) in enumerate(zip(self._input_sizing, self._input_sizing[1:])):
             # print("reparaming from {} to {} for {}-th reparam which is a {} with shape {}".format(
             #     begin, end, i, self.reparameterizers[i], logits[:, begin:end].shape))
-            reparameterized_i, params = self.reparameterizers[i](logits[:, begin:end])
+            reparameterized_i, params = self.reparameterizers[i](logits[:, begin:end], force=force)
             reparameterized.append(reparameterized_i)
             params_list.append({**params, 'logits': logits[:, begin:end]})
 
         return torch.cat(reparameterized, -1), params_list
 
-    def forward(self, logits):
-        return self.reparameterize(logits)
+    def forward(self, logits, force=False):
+        return self.reparameterize(logits, force=force)
 
     def prior(self, batch_size, **kwargs):
         """ Gen the first prior.

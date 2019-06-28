@@ -111,7 +111,7 @@ class Bernoulli(nn.Module):
     def log_likelihood(self, z, params):
         return D.Bernoulli(logits=params['discrete']['logits']).log_prob(z)
 
-    def forward(self, logits):
+    def forward(self, logits, force=False):
         self.cosine_anneal()  # anneal first
         z, z_hard = self.reparmeterize(logits)
         params = {
@@ -121,7 +121,7 @@ class Bernoulli(nn.Module):
         }
         self.iteration += 1
 
-        if self.training:
+        if self.training or force:
             # return the reparameterization
             # and the params of gumbel
             return z, { 'z': z, 'logits': logits, 'discrete': params }

@@ -251,8 +251,9 @@ class GumbelSoftmax(nn.Module):
         """
         return D.Categorical(logits=params['discrete']['logits']).log_prob(z)
 
-    def forward(self, logits):
+    def forward(self, logits, force=False):
         """ Returns a reparameterized categorical and it's params.
+            NOTE: annealing doesn't take place if testing (even with force=True).
 
         :param logits: unactivated logits.
         :returns: reparam tensor and params.
@@ -269,7 +270,7 @@ class GumbelSoftmax(nn.Module):
         }
         self.iteration += 1
 
-        if self.training:
+        if self.training or force:
             # return the reparameterization
             # and the params of gumbel
             return z, { 'z': z, 'discrete': params }

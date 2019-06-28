@@ -41,7 +41,7 @@ class IsotropicGaussian(nn.Module):
             ).normal_(mean=0, std=scale_var)
         )
 
-    def _reparametrize_gaussian(self, mu, logvar):
+    def _reparametrize_gaussian(self, mu, logvar, force=False):
         """ Internal member to reparametrize gaussian.
 
         :param mu: mean logits
@@ -50,7 +50,7 @@ class IsotropicGaussian(nn.Module):
         :rtype: torch.Tensor, dict
 
         """
-        if self.training: # returns a stochastic sample for training
+        if self.training or force: # returns a stochastic sample for training
             std = logvar.mul(0.5).exp()
             eps = same_type(is_half(logvar), logvar.is_cuda)(
                 logvar.size()
@@ -62,7 +62,7 @@ class IsotropicGaussian(nn.Module):
 
         return mu, {'mu': mu, 'logvar': logvar}
 
-    def reparmeterize(self, logits):
+    def reparmeterize(self, logits, force=False):
         """ Given logits reparameterize to a gaussian using
             first half of features for mean and second half for std.
 
@@ -89,7 +89,7 @@ class IsotropicGaussian(nn.Module):
         else:
             raise Exception("unknown number of dims for isotropic gauss reparam")
 
-        return self._reparametrize_gaussian(mu, sigma)
+        return self._reparametrize_gaussian(mu, sigma, force=force)
 
     def get_reparameterizer_scalars(self):
         """ Returns any scalars used in reparameterization.
@@ -162,7 +162,7 @@ class IsotropicGaussian(nn.Module):
         return D.Normal(params['gaussian']['mu'],
                         params['gaussian']['logvar']).log_prob(z)
 
-    def forward(self, logits):
+    def forward(self, logits, force=False):
         """ Returns a reparameterized gaussian and it's params.
 
         :param logits: unactivated logits.
@@ -170,7 +170,7 @@ class IsotropicGaussian(nn.Module):
         :rtype: torch.Tensor, dict
 
         """
-        z, gauss_params = self.reparmeterize(logits)
+        z, gauss_params = self.reparmeterize(logits, force=force)
         gauss_params['mu_mean'] = torch.mean(gauss_params['mu'])
         gauss_params['logvar_mean'] = torch.mean(gauss_params['logvar'])
         return z, { 'z': z, 'logits': logits, 'gaussian':  gauss_params }

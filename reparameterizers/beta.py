@@ -52,7 +52,7 @@ class Beta(nn.Module):
         )
         return PD.Beta(conc1, conc2).sample()
 
-    def _reparametrize_beta(self, conc1, conc2):
+    def _reparametrize_beta(self, conc1, conc2, force=False):
         """ Internal function to reparameterize beta distribution using concentrations.
 
         :param conc1: concentration 1
@@ -61,7 +61,7 @@ class Beta(nn.Module):
         :rtype: torch.Tensor, dict
 
         """
-        if self.training:
+        if self.training or force:
             # rsample is CPU only ¯\_(ツ)_/¯, see https://tinyurl.com/y9e8mtcd
             # thus use pyro which DOES have a GPU version
             beta = PD.Beta(conc1, conc2).rsample()
@@ -70,7 +70,7 @@ class Beta(nn.Module):
         # can't use mean like in gaussian because beta mean can be > 1.0
         return PD.Beta(conc1, conc2).sample(), {'conc1': conc1, 'conc2': conc2}
 
-    def reparmeterize(self, logits):
+    def reparmeterize(self, logits, force=False):
         """ Given logits reparameterize to a beta using
             first half of features for mean and second half for std.
 
@@ -91,7 +91,7 @@ class Beta(nn.Module):
         else:
             raise Exception("unknown number of dims for isotropic gauss reparam")
 
-        return self._reparametrize_beta(conc1, conc2)
+        return self._reparametrize_beta(conc1, conc2, force=force)
 
     def _kld_beta_kerman_prior(self, conc1, conc2):
         """ Internal function to do a KL-div against the prior.
@@ -148,7 +148,7 @@ class Beta(nn.Module):
         return PD.Beta(params['beta']['conc1'],
                        params['beta']['conc2']).log_prob(z)
 
-    def forward(self, logits):
+    def forward(self, logits, force=False):
         """ Returns a reparameterized gaussian and it's params.
 
         :param logits: unactivated logits.
@@ -156,7 +156,7 @@ class Beta(nn.Module):
         :rtype: torch.Tensor, dict
 
         """
-        z, beta_params = self.reparmeterize(logits)
+        z, beta_params = self.reparmeterize(logits, force=force)
         beta_params['conc1_mean'] = torch.mean(beta_params['conc1'])
         beta_params['conc2_mean'] = torch.mean(beta_params['conc2'])
         return z, { 'z': z, 'logits': logits, 'beta':  beta_params }

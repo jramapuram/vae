@@ -140,7 +140,7 @@ class SequentialReparameterizer(nn.Module):
 
         return kl
 
-    def reparameterize(self, logits):
+    def reparameterize(self, logits, force=False):
         """ execute the reparameterization layer-by-layer returning ALL params and last logits.
 
         :param logits: the input logits
@@ -148,6 +148,7 @@ class SequentialReparameterizer(nn.Module):
         :rtype: torch.Tensor, list
 
         """
+        assert force is False, "force not implemented for sequential reparameterizer"
         params_list = []
         for reparam in self.reparameterizers:
             logits, params = reparam(logits)
