@@ -40,7 +40,8 @@ class VarianceProjector(nn.Module):
             if config['decoder_layer_type'] in ['conv', 'coordconv', 'resnet']:
                 self.decoder_projector = nn.Sequential(
                     activation_fn(),
-                    nn.ConvTranspose2d(chans, chans*2, 1, stride=1, bias=False)
+                    # nn.ConvTranspose2d(chans, chans*2, 1, stride=1, bias=False)
+                    nn.Conv2d(chans, chans*2, 1, stride=1, bias=False)
                 )
             else: # dense projector
                 input_flat = int(np.prod(output_shape))
@@ -171,13 +172,12 @@ class AbstractVAE(nn.Module):
                                                         normalization_str=self.config['conv_normalization'])
         elif nll_has_variance(self.config['nll_type']):
             # add the variance projector (if we are in that case for the NLL)
-            warnings.warn("\nCurrently variance is not being added to p(x|z)\ --> using mean. \n")
-            # print("adding variance projector for {} log-likelihood".format(self.config['nll_type']))
-            # decoder = nn.Sequential(
-            #     decoder,
-            #     # TODO: if you need variance on the decoded distribution use the following:
-            #     # VarianceProjector(self.input_shape, self.activation_fn, self.config)
-            # )
+            # warnings.warn("\nCurrently variance is not being added to p(x|z)\ --> using mean. \n")
+            print("adding variance projector for {} log-likelihood".format(self.config['nll_type']))
+            decoder = nn.Sequential(
+                decoder,
+                VarianceProjector(self.input_shape, self.activation_fn, self.config)
+            )
 
         return decoder
 
