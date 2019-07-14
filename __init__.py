@@ -2,7 +2,7 @@ from .msg import MSGVAE
 from .vrnn import VRNN
 from .additive_vrnn import AdditiveVRNN
 from .simple_vae import SimpleVAE
-from .autoencoder import Autoencoder
+from .autoencoder import Autoencoder, VAENoKL
 from .symmetric_simple_vae import SymmetricSimpleVAE
 from .parallelly_reparameterized_vae import ParallellyReparameterizedVAE
 from .sequentially_reparameterized_vae import SequentiallyReparameterizedVAE
@@ -17,6 +17,7 @@ def build_vae(vae_type_str):
     """
     vae_type_map = {
         'autoencoder': Autoencoder,
+        'vaenokl': VAENoKL,
         'simple': SimpleVAE,
         'msg': MSGVAE,
         'vrnn': VRNN,

@@ -2,26 +2,45 @@ from __future__ import print_function
 
 import torch
 
-from .abstract_vae import AbstractVAE
-from helpers.utils import nan_check_and_break, zeros
+from .simple_vae import SimpleVAE
+from helpers.utils import nan_check_and_break, zeros, same_type, is_half
 from helpers.distributions import nll as nll_fn
 from helpers.layers import get_decoder, get_encoder, str_to_activ_module
 
 
-class Autoencoder(AbstractVAE):
-    def __init__(self, input_shape, **kwargs):
-        """ Implements a simple autoencoder
+class VAENoKL(SimpleVAE):
+    def loss_function(self, recon_x, x, reparam_map):
+        """ VAE with no KL objective. Still uses reparam.
 
-        :param input_shape: the input shape
-        :returns: an object of AbstractVAE
-        :rtype: AbstractVAE
+        :param recon_x: the unactivated reconstruction preds.
+        :param x: input tensor.
+        :returns: loss dict
+        :rtype: dict
 
         """
-        super(Autoencoder, self).__init__(input_shape, **kwargs)
+        nll = nll_fn(x, recon_x, self.config['nll_type'])
+        nan_check_and_break(nll, "nll")
+        return {
+            'loss': nll,
+            'loss_mean': torch.mean(nll),
+            'elbo_mean': torch.mean(torch.zeros_like(nll)),
+            'nll_mean': torch.mean(nll),
+            'kld_mean': torch.mean(torch.zeros_like(nll)),
+            'proxy_mean': torch.mean(torch.zeros_like(nll)),
+            'mut_info_mean': torch.mean(torch.zeros_like(nll)),
+        }
 
-        # build the encoder and decoder
-        self.encoder = self.build_encoder()
-        self.decoder = self.build_decoder()
+class Autoencoder(SimpleVAE):
+    def reparameterize(self, logits):
+        """ Reparameterize the logits and returns a dict.
+
+        :param logits: unactivated encoded logits.
+        :returns: reparam dict
+        :rtype: dict
+
+        """
+        return logits, {}
+
 
     def build_encoder(self):
         """ helper to build the encoder type
@@ -57,25 +76,6 @@ class Autoencoder(AbstractVAE):
         # append the variance as necessary
         return self._append_variance_projection(decoder)
 
-    def reparameterize(self, logits):
-        """ Reparameterize the logits and returns a dict.
-
-        :param logits: unactivated encoded logits.
-        :returns: reparam dict
-        :rtype: dict
-
-        """
-        return logits, {}
-
-    def get_reparameterizer_scalars(self):
-        """ return the reparameterization scalars (eg: tau in gumbel)
-
-        :returns: a dict of scalars
-        :rtype: dict
-
-        """
-        return {}
-
     def generate_synthetic_samples(self, batch_size, **kwargs):
         """ Generates samples with VAE.
 
@@ -84,11 +84,22 @@ class Autoencoder(AbstractVAE):
         :rtype: torch.Tensor
 
         """
-        return zeros([batch_size] + self.input_shape, cuda=self.config['cuda'])
+        # return zeros([batch_size] + self.input_shape, cuda=self.config['cuda'])
+        z_mu = self.aggregate_posterior.ema_val
+        z_logvar = same_type(is_half(z_mu), z_mu.is_cuda)(
+            z_mu.size()
+        ).normal_()
+        z_samples = z_mu + z_logvar
+        if self.config['decoder_layer_type'] == "pixelcnn":
+            # decode the synthetic samples through the base decoder
+            decoded = self.decoder(z_samples)
+            return self.generate_pixel_cnn(batch_size, decoded)
 
+        # in the normal case just decode and activate
+        return self.nll_activation(self.decode(z_samples))
 
     def loss_function(self, recon_x, x, reparam_map):
-        """ Produces ELBO, handles mutual info and proxy loss terms too.
+        """ Autoencoder is simple the NLL term in the VAE.
 
         :param recon_x: the unactivated reconstruction preds.
         :param x: input tensor.
