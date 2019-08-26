@@ -81,6 +81,11 @@ class IsotropicGaussian(nn.Module):
             sigma = logits[:, int(feature_size/2):] + eps
             # sigma = F.softplus(logits[:, int(feature_size/2):]) + eps
             # sigma = F.hardtanh(logits[:, int(feature_size/2):], min_val=-6.,max_val=2.)
+        elif logits.dim() == 3: # time or bmm type problem
+            feature_size = logits.size(-1)
+            assert feature_size % 2 == 0 and feature_size // 2 == self.output_size
+            mu = logits[:, :, 0:int(feature_size/2)]
+            sigma = logits[:, :, int(feature_size/2):] + eps
         elif logits.dim() == 4:
             feature_size = logits.size(1)
             assert feature_size % 2 == 0 and feature_size // 2 == self.output_size
