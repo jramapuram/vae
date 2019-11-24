@@ -89,8 +89,7 @@ class VRNNMemory(nn.Module):
         """
         self.memory_buffer.clear()
 
-    def init_state(self, batch_size, cuda=False,
-                   override_noisy_state=False):
+    def init_state(self, batch_size, cuda=False, override_noisy_state=False):
         """ Initializes (or re-initializes) the state.
 
         :param batch_size: size of batch
@@ -387,8 +386,13 @@ class VRNN(AbstractVAE):
             assert self.config['nll_type'] == "disc_mix_logistic", \
                 "pixelcnn only works with disc_mix_logistic"
 
-        decoder = get_decoder(self.config, reupsample)(input_size=self.config['latent_size']*2,
-                                                       output_shape=self.input_shape,
+        # create a dupe config
+        dec_conf = deepcopy(self.config)
+        if dec_conf['nll_type'] == 'pixel_wise':
+            dec_conf['input_shape'][0] *= 256
+
+        decoder = get_decoder(dec_conf, reupsample)(input_size=self.config['latent_size']*2,
+                                                       output_shape=dec_conf['input_shape'],
                                                        activation_fn=self.activation_fn,
                                                        reupsample=True)
         # append the variance as necessary
@@ -533,7 +537,7 @@ class VRNN(AbstractVAE):
                 decode_t, params_t = self.step(input_t[i])
             else:                          # single input encoded many times
                 decode_t, params_t = self.step(input_t)
-                input_t = decode_t
+                input_t = nll_activation_fn(decode_t, self.config['nll_type'])
 
             if self.training and i == 0:
                 self.aggregate_posterior['rnn_hidden_state_h'](self.memory.get_state()[0])
@@ -742,8 +746,10 @@ class VRNN(AbstractVAE):
 
         """
         if 'reset_state' in kwargs and kwargs['reset_state']:
-            self.memory.init_state(batch_size, cuda=self.config['cuda'])# ,
-                                   # override_noisy_state=True)
+            override_noisy_state = kwargs.get('override_noisy_state', False)
+            self.memory.init_state(batch_size, cuda=self.config['cuda'],
+                                   override_noisy_state=override_noisy_state)
+
         # grab final state and prior samples & encode them through feature extractor
         final_state, z_prior_t = self._get_prior_and_state(batch_size, **kwargs)
         phi_z_t = self.phi_z(z_prior_t)
@@ -756,6 +762,7 @@ class VRNN(AbstractVAE):
         # iterate max_time_steps -1  times using the output from above
         for _ in range(self.config['max_time_steps'] - 1):
             dec_output_t, _ = self.step(dec_output_t, **kwargs)
+            dec_output_t = nll_activation_fn(dec_output_t, self.config['nll_type'])
             decoded_list.append(dec_output_t.clone())
 
         return torch.cat(decoded_list, 0)

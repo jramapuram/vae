@@ -9,11 +9,11 @@ import torch.nn.functional as F
 from copy import deepcopy
 from torch.autograd import Variable
 from collections import OrderedDict, Counter
-
 from helpers.pixel_cnn.model import PixelCNN
 from helpers.utils import same_type, zeros, nan_check_and_break, one_hot_np, get_dtype
 from helpers.layers import View, flatten_layers, Identity, EMA, \
-    build_pixelcnn_decoder, add_normalization, str_to_activ_module, get_decoder, get_encoder
+    build_pixelcnn_decoder, add_normalization, str_to_activ_module, \
+    get_decoder, get_encoder, build_volume_preserving_resnet, ResnetDeconvBlock, ResnetBlock, AttentionBlock
 from helpers.distributions import nll_activation as nll_activation_fn
 from helpers.distributions import nll as nll_fn
 from helpers.distributions import nll_has_variance
@@ -37,8 +37,16 @@ class VarianceProjector(nn.Module):
 
         # build the sequential layer
         if nll_has_variance(config['nll_type']):
+            # self.register_parameter(
+            #     "variance_scalar",
+            #     #nn.Parameter(torch.randn(config['batch_size'], self.chans, 1, 1) * 0.01)
+            #     #nn.Parameter(torch.zeros(config['batch_size'], self.chans, 1, 1))
+            #     #nn.Parameter(torch.zeros(config['batch_size'], self.chans, 1, 1))
+            #     nn.Parameter(torch.zeros(1, self.chans, 1, 1))
+            #     #nn.Parameter(torch.zeros(1))
+            # )
             if config['decoder_layer_type'] in ['conv', 'coordconv', 'resnet']:
-                self.decoder_projector = nn.Sequential(
+		self.decoder_projector = nn.Sequential(
                     activation_fn(),
                     # nn.ConvTranspose2d(chans, chans*2, 1, stride=1, bias=False)
                     nn.Conv2d(chans, chans*2, 1, stride=1, bias=False)
@@ -55,7 +63,13 @@ class VarianceProjector(nn.Module):
 
     def forward(self, x):
         if hasattr(self, 'decoder_projector'):
-            return self.decoder_projector(x)
+            assert x.dim() == 4, "got greater than 4d, why?"
+            decoded = self.decoder_projector(x)
+            half_chans = decoded.shape[1] // 2
+            return torch.cat([decoded[:, 0:half_chans, :, :],    # clamp the variance below with sigm
+                              decoded[:, half_chans:, :, :]], 1)
+                              # torch.sigmoid(decoded[:, half_chans:, :, :])], 1)
+                              # F.softplus(decoded[:, half_chans:, :, :], beta=1)], 1)
 
         return x
 
@@ -97,27 +111,84 @@ class AbstractVAE(nn.Module):
         :rtype: nn.Module
 
         """
-        conv_layer_types = ['conv', 'coordconv', 'resnet']
-        input_shape = [self.input_shape[0], 0, 0] if self.config['encoder_layer_type'] \
-            in conv_layer_types else self.input_shape
+        # conv_layer_types = ['conv', 'coordconv', 'resnet']
+        # input_shape = [self.input_shape[0], 0, 0] if self.config['encoder_layer_type'] \
+        #     in conv_layer_types else self.input_shape
 
         # return the encoder
-        return get_encoder(self.config)(input_shape=input_shape,
-                                        output_size=self.reparameterizer.input_size,
-                                        activation_fn=self.activation_fn)
+        # return get_encoder(self.config)(input_shape=input_shape,
+        #                                 output_size=self.reparameterizer.input_size,
+        #                                 activation_fn=self.activation_fn)
 
-    def lazy_build_decoder(self, input_size):
-        """ Lazily build the decoder network given the input_size
+        # return nn.Sequential(
+        #     nn.Conv2d(input_shape[0], self.config['filter_depth'], kernel_size=5, stride=1),
+        #     nn.GroupNorm(16, self.config['filter_depth']),
+        #     # nn.BatchNorm2d(self.config['filter_depth']),
+        #     nn.ELU(),
+        #     nn.Conv2d(self.config['filter_depth'], self.config['filter_depth']*2, kernel_size=4, stride=2),
+        #     nn.GroupNorm(32, self.config['filter_depth']*2),
+        #     # nn.BatchNorm2d(self.config['filter_depth']*2),
+        #     nn.ELU(),
+        #     nn.Conv2d(self.config['filter_depth']*2, self.config['filter_depth'], kernel_size=4, stride=1),
+        #     nn.GroupNorm(16, self.config['filter_depth']),
+        #     # nn.BatchNorm2d(self.config['filter_depth']),
+        #     nn.ELU(),
+        #     nn.Conv2d(self.config['filter_depth'], self.reparameterizer.input_size, kernel_size=1, stride=1)
+        #     # nn.Conv2d(256, 128, kernel_size=4, stride=2),
+        #     # nn.BatchNorm2d(128)
+        # )
 
-        :param input_size: the input size of the latent vector
-        :returns: a decoder
-        :rtype: nn.Module
+        # return nn.Sequential(
+        #     build_volume_preserving_resnet(input_shape, self.config['filter_depth'],
+        #                                    activation_fn=self.activation_fn,
+        #                                    num_layers=4,
+        #                                    normalization_str=self.config['conv_normalization']),
+        #     nn.Conv2d(input_shape[0], input_shape[0]*2, kernel_size=1)
+        #     # nn.Conv2d(input_shape[0], self.config['filter_depth'], ker nel_size=5, stride=1),
+        #     # nn.GroupNorm(16, self.config['filter_depth']),
+        #     # nn.ELU(),
+        #     # nn.Conv2d(self.config['filter_depth'], self.config['filter_depth']*2, kernel_size=4, stride=2),
+        #     # nn.GroupNorm(32, self.config['filter_depth']*2),
+        #     # nn.ELU(),
+        #     # nn.Conv2d(self.config['filter_depth']*2, self.config['filter_depth'], kernel_size=4, stride=1),
+        #     # nn.GroupNorm(16, self.config['filter_depth']),
+        #     # nn.ELU(),
+        #     # nn.Conv2d(self.config['filter_depth'], self.reparameterizer.input_size, kernel_size=1, stride=1)
+        # )
 
-        """
-        if not hasattr(self, 'decoder'):
-            setattr(self, 'decoder', self._build_decoder(input_size))
+        # ResnetBlock(3, 32, stride=1, normalization_str='groupnorm', downsample=True, activation_fn=nn.ELU),
+        # ResnetBlock(32, 64, stride=2, normalization_str='groupnorm', downsample=True, activation_fn=nn.ELU),
+        # ResnetBlock(64, 128, stride=1, normalization_str='groupnorm', downsample=True, activation_fn=nn.ELU),
+        # ResnetBlock(32, 2, stride=1, normalization_str='groupnorm', downsample=True, activation_fn=nn.ELU),
 
-        return self.decoder
+        # return nn.Sequential(
+        #     nn.Conv2d(3, 32, kernel_size=4, stride=2, padding=1),
+        #     nn.ELU(),
+        #     nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
+        #     nn.ELU(),
+        #     nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+        #     nn.ELU(),
+        #     ResnetBlock(64, 64, stride=1, normalization_str='none', downsample=True, activation_fn=nn.ELU),
+        #     ResnetBlock(64, 64, stride=1, normalization_str='none', downsample=True, activation_fn=nn.ELU),
+        #     ResnetBlock(64, 64, stride=1, normalization_str='none', downsample=True, activation_fn=nn.ELU),
+        #     nn.Conv2d(64, 1, kernel_size=1, stride=1)
+        # )
+
+
+        return nn.Sequential(
+            get_encoder(self.config)(input_shape=self.input_shape,
+                                     output_size=self.reparameterizer.input_size,
+                                     activation_fn=self.activation_fn),
+            # AttentionBlock(input_shape=self.reparameterizer.input_size,
+            #                embedding_size=self.reparameterizer.input_size*3, num_heads=3,
+            #                normalization_str='none'),
+            # AttentionBlock(input_shape=self.reparameterizer.input_size*3,
+            #                embedding_size=self.reparameterizer.input_size*3, num_heads=3,
+            #                normalization_str='none'),
+            # AttentionBlock(input_shape=self.reparameterizer.input_size*3,
+            #                embedding_size=self.reparameterizer.input_size, num_heads=1,
+            #                normalization_str='none'),
+        )
 
     def build_decoder(self, reupsample=True):
         """ helper function to build convolutional or dense decoder
@@ -131,9 +202,96 @@ class AbstractVAE(nn.Module):
                 or self.config['nll_type'] == "log_logistic_256", \
                 "pixelcnn only works with disc_mix_logistic or log_logistic_256"
 
-        decoder = get_decoder(self.config, reupsample)(input_size=self.reparameterizer.output_size,
-                                                       output_shape=self.input_shape,
-                                                       activation_fn=self.activation_fn)
+        chans = self.input_shape[0]
+
+        # decoder = nn.Sequential(
+        #     build_volume_preserving_resnet(self.input_shape, self.config['filter_depth'],
+        #                                    activation_fn=self.activation_fn,
+        #                                    num_layers=4,
+        #                                    normalization_str=self.config['conv_normalization']),
+        #     # # nn.Conv2d(self.input_shape[0], self.input_shape[0], kernel_size=1)
+
+        #     # nn.ConvTranspose2d(self.reparameterizer.output_size, self.config['filter_depth']*4, kernel_size=4),
+        #     # nn.GroupNorm(32, self.config['filter_depth']*4),
+        #     # nn.ELU(),
+
+        #     # nn.ConvTranspose2d(self.config['filter_depth']*4, self.config['filter_depth']*2, kernel_size=4),
+        #     # nn.GroupNorm(32, self.config['filter_depth']*2),
+        #     # nn.ELU(),
+
+        #     # nn.ConvTranspose2d(self.config['filter_depth']*2, self.config['filter_depth'], kernel_size=4, stride=2),
+        #     # nn.GroupNorm(16, self.config['filter_depth']),
+        #     # nn.ELU(),
+
+        #     # nn.ConvTranspose2d(self.config['filter_depth'], chans, kernel_size=5, stride=1),
+        #     # nn.ELU(),
+        #     # nn.Conv2d(chans, chans, kernel_size=1),
+        #     # nn.Upsample(size=self.input_shape[1:], mode='bilinear', align_corners=True)
+        # )
+
+        # decoder = nn.Sequential(
+        #     ResnetDeconvBlock(1, 32, stride=1, upsample=True, normalization_str='groupnorm', activation_fn=nn.ELU),
+        #     ResnetDeconvBlock(32, 64, stride=1, upsample=True, normalization_str='groupnorm', activation_fn=nn.ELU),
+        #     ResnetDeconvBlock(64, 32, stride=1, upsample=True, normalization_str='groupnorm', activation_fn=nn.ELU),
+        #     ResnetDeconvBlock(32, 3, stride=1, upsample=True, normalization_str='none', activation_fn=Identity),
+        # )
+
+        # decoder = nn.Sequential(
+        #     nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
+        #     ResnetBlock(64, 64, stride=1, normalization_str='none', downsample=True, activation_fn=nn.ELU),
+        #     ResnetBlock(64, 64, stride=1, normalization_str='none', downsample=True, activation_fn=nn.ELU),
+        #     ResnetBlock(64, 64, stride=1, normalization_str='none', downsample=True, activation_fn=nn.ELU),
+        #     nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+        #     nn.ELU(),
+        #     nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1)
+        # )
+
+        # decoder = nn.Sequential(
+        #     nn.ConvTranspose2d(self.reparameterizer.output_size, self.config['filter_depth']*4, kernel_size=4),
+        #     nn.GroupNorm(32, self.config['filter_depth']*4),
+        #     # nn.BatchNorm2d(self.config['filter_depth']*2),
+        #     nn.ELU(),
+
+        #     nn.ConvTranspose2d(self.config['filter_depth']*4, self.config['filter_depth']*2, kernel_size=4),
+        #     nn.GroupNorm(32, self.config['filter_depth']*2),
+        #     # nn.BatchNorm2d(self.config['filter_depth']*2),
+        #     nn.ELU(),
+
+        #     nn.ConvTranspose2d(self.config['filter_depth']*2, self.config['filter_depth'], kernel_size=4, stride=2),
+        #     nn.GroupNorm(16, self.config['filter_depth']),
+        #     # nn.BatchNorm2d(self.config['filter_depth']),
+        #     nn.ELU(),
+
+        #     nn.ConvTranspose2d(self.config['filter_depth'], chans, kernel_size=5, stride=1),
+        #     # nn.BatchNorm2d(chans),
+        #     nn.ELU(),
+        #     nn.Conv2d(chans, chans, kernel_size=1),
+        #     nn.Upsample(size=self.input_shape[1:], mode='bilinear', align_corners=True)
+        # )
+
+        # decoder = get_decoder(self.config, reupsample)(input_size=self.reparameterizer.output_size,
+        #                                                output_shape=self.input_shape,
+        #                                                activation_fn=self.activation_fn)
+
+        dec_conf = deepcopy(self.config)
+        if dec_conf['nll_type'] == 'pixel_wise':
+            dec_conf['input_shape'][0] *= 256
+
+        decoder = nn.Sequential(
+            # AttentionBlock(input_shape=self.reparameterizer.output_size,
+            #                embedding_size=self.reparameterizer.output_size*3, num_heads=3,
+            #                normalization_str='none'),
+            # AttentionBlock(input_shape=self.reparameterizer.output_size*3,
+            #                embedding_size=self.reparameterizer.output_size*3, num_heads=3,
+            #                normalization_str='none'),
+            # AttentionBlock(input_shape=self.reparameterizer.output_size*3,
+            #                embedding_size=self.reparameterizer.output_size, num_heads=1,
+            #                normalization_str='none'),
+            get_decoder(dec_conf, reupsample)(input_size=self.reparameterizer.output_size,
+                                              output_shape=dec_conf['input_shape'],
+                                              activation_fn=self.activation_fn)
+        )
+
         # append the variance as necessary
         return self._append_variance_projection(decoder)
 
@@ -402,7 +560,56 @@ class AbstractVAE(nn.Module):
         params = self._compute_mi_params(decoded_logits, params)
         return decoded_logits, params
 
-    def loss_function(self, recon_x, x, params):
+    def importance_weighted_elbo_analytic(self, x, K=5000):
+        """ ELBO using importance samples.
+
+        :param x: input data.
+        :param K: number of importance samples.
+        :returns: negative ELBO
+        :rtype: float32
+
+        """
+        elbo_mu = torch.zeros(x.shape[0], device=x.device)
+
+        for _ in tqdm(range(K)):
+            self.reparameterize(params['z'], force=True)
+            decoded_logits, params = self(x)
+            loss_t = self.loss_function(decoded_logits, x, params)
+            elbo_mu += loss_t['elbo']
+
+        # log-sum exp and return
+        return torch.logsumexp(elbo_mu / K, dim=0)
+
+    def importance_weighted_elbo_monte_carlo(self, x, K=500):
+        """ ELBO using importance samples.
+
+        :param x: input data.
+        :param K: number of importance samples.
+        :returns: negative ELBO
+        :rtype: float32
+
+        """
+        elbo_mu = torch.zeros(x.shape[0], device=x.device)
+        from tqdm import tqdm
+
+        for _ in tqdm(range(K)):
+            z, params = self.posterior(x, force=True)
+            decoded_logits = self.decode(z, x=x)
+
+            # grab log likelihood of posterior and prior over z
+            log_q_z_given_x = self.reparameterizer.log_likelihood(z, params)
+            prior_params = self.reparameterizer.prior_params(x.shape[0])
+            log_p_z = self.reparameterizer.log_likelihood(z, prior_params)
+
+            # compute the NLL and the log_q_z_given_x - log_p_z
+            nll = nll_fn(x, decoded_logits, self.config['nll_type'])
+            kl_z = torch.sum(log_q_z_given_x - log_p_z, -1)
+            elbo_mu += nll - kl_z
+
+        # log-sum exp and return
+        return torch.logsumexp(elbo_mu / K, dim=0)
+
+    def loss_function(self, recon_x, x, params, K=1):
         """ Produces ELBO, handles mutual info and proxy loss terms too.
 
         :param recon_x: the unactivated reconstruction preds.
@@ -418,6 +625,16 @@ class AbstractVAE(nn.Module):
         #     x = (x + .5) / 256.
 
         nll = nll_fn(x, recon_x, self.config['nll_type'])
+
+        # multiple monte-carlo samples for the decoder.
+        if self.training:
+            for k in range(1, K):
+                z_k, params_k = self.reparameterize(params['logits'])
+                recon_x_i = self.decode(z_k)
+                nll = nll + nll_fn(x, recon_x_i, self.config['nll_type'])
+
+            nll = nll / K
+
         kld = self.kld(params)
         elbo = nll + kld  # save the base ELBO, but use the beta-vae elbo for the full loss
 
@@ -432,9 +649,11 @@ class AbstractVAE(nn.Module):
         # handle the mutual information term
         mut_info = self.mut_info(params, x.size(0))
 
+        # compute full loss
         loss = (nll + self.config['kl_beta'] * kld) - mut_info
         return {
             'loss': loss,
+            'elbo': elbo,
             'loss_mean': torch.mean(loss),
             'elbo_mean': torch.mean(elbo),
             'nll_mean': torch.mean(nll),
@@ -463,15 +682,16 @@ class AbstractVAE(nn.Module):
         """
         return self.reparameterizer.get_reparameterizer_scalars()
 
-    def reparameterize(self, logits):
+    def reparameterize(self, logits, force=False):
         """ Reparameterize the logits and returns a dict.
 
         :param logits: unactivated encoded logits.
+        :param force: force reparameterize the distributions
         :returns: reparam dict
         :rtype: dict
 
         """
-        return self.reparameterizer(logits)
+        return self.reparameterizer(logits, force=force)
 
     def decode(self, z, x=None):
         """ Decode a latent z back to x.
@@ -499,19 +719,18 @@ class AbstractVAE(nn.Module):
 
         return decoded_logits
 
-    def posterior(self, x):
+    def posterior(self, x, force=False):
         """ get a reparameterized Q(z|x) for a given x
 
         :param x: input tensor
+        :param force:  force reparameterization
         :returns: reparam dict
         :rtype: torch.Tensor
 
         """
         z_logits = self.encode(x)               # encode logits
-        if self.training:
-            self.aggregate_posterior(z_logits)  # aggregate posterior
-
-        return self.reparameterize(z_logits)    # return reparameterized value
+        self.aggregate_posterior(z_logits)      # aggregate posterior EMA
+        return self.reparameterize(z_logits, force=force)    # return reparameterized value
 
     def encode(self, x):
         """ Encodes a tensor x to a set of logits.
@@ -526,7 +745,11 @@ class AbstractVAE(nn.Module):
             x = (x + .5) / 256.0
 
         # print('[ORIG] x max = ', x.max(), " min = ", x.min())
-        return self.encoder(x)
+        encoded = self.encoder(x)
+        if encoded.dim() < 2:
+            return encoded.unsqueeze(-1)
+
+        return encoded
 
     def kld(self, dist_a):
         """ KL-Divergence of the distribution dict and the prior of that distribution.
@@ -582,8 +805,7 @@ class AbstractVAE(nn.Module):
         mut_info = same_type(self.config['half'], self.config['cuda'])(batch_size).zero_()
 
         # only grab the mut-info if the scalars above are set
-        if (self.config['continuous_mut_info'] > 0
-             or self.config['discrete_mut_info'] > 0):
+        if self.config['continuous_mut_info'] > 0 or self.config['discrete_mut_info'] > 0:
             mut_info = self._clamp_mut_info(self.reparameterizer.mutual_info(dist_params))
 
         return mut_info

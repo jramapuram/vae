@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 
 from helpers.utils import zeros_like, ones_like, same_type, \
-    float_type, nan_check_and_break, is_half
+    float_type, nan_check_and_break, is_half, zeros
 from helpers.utils import eps as eps_fn
 
 
@@ -25,6 +25,42 @@ class IsotropicGaussian(nn.Module):
         self.input_size = self.config['continuous_size']
         assert self.config['continuous_size'] % 2 == 0
         self.output_size = self.config['continuous_size'] // 2
+
+    def prior_params(self, batch_size, **kwargs):
+        """ Helper to get prior parameters
+
+        :param batch_size: the size of the batch
+        :returns: a dictionary of parameters
+        :rtype: dict
+
+        """
+        mu = same_type(self.config['half'], self.config['cuda'])(
+            batch_size, self.output_size
+        ).zero_() # zero mean
+
+        # variance = 1 unless otherwise specified
+        scale_var = 1.0 if 'scale_var' not in kwargs else kwargs['scale_var']
+        sigma = same_type(self.config['half'], self.config['cuda'])(
+            batch_size, self.output_size
+        ).zero_() + scale_var
+
+        return {
+            'gaussian': {
+                'mu': mu,
+                'logvar': sigma
+            }
+        }
+
+    def prior_distribution(self, batch_size, **kwargs):
+        """ get a torch distrbiution prior
+
+        :param batch_size: size of the prior
+        :returns: isotropic gaussian prior
+        :rtype: torch.distribution
+
+        """
+        params = self.prior_params(batch_size, **kwargs)
+        return D.Normal(params['gaussian']['mu'], params['gaussian']['logvar'])
 
     def prior(self, batch_size, **kwargs):
         """ Sample the prior for batch_size samples.
@@ -57,10 +93,11 @@ class IsotropicGaussian(nn.Module):
             ).normal_()
             eps = Variable(eps)
             nan_check_and_break(logvar, "logvar")
-            return eps.mul(std).add_(mu), {'mu': mu, 'logvar': logvar}
+            reparam_sample = eps.mul(std).add_(mu)
+            return reparam_sample, {'z': reparam_sample, 'mu': mu, 'logvar': logvar}
             # return D.Normal(mu, logvar).rsample(), {'mu': mu, 'logvar': logvar}
 
-        return mu, {'mu': mu, 'logvar': logvar}
+        return mu, {'z': mu, 'mu': mu, 'logvar': logvar}
 
     def reparmeterize(self, logits, force=False):
         """ Given logits reparameterize to a gaussian using
@@ -75,7 +112,8 @@ class IsotropicGaussian(nn.Module):
 
         if logits.dim() == 2:
             feature_size = logits.size(-1)
-            assert feature_size % 2 == 0 and feature_size // 2 == self.output_size
+            assert feature_size % 2 == 0 and feature_size // 2 == self.output_size, \
+                "feature_size = {}".format(feature_size)
             mu = logits[:, 0:int(feature_size/2)]
             nan_check_and_break(mu, "mu")
             sigma = logits[:, int(feature_size/2):] + eps
@@ -88,7 +126,8 @@ class IsotropicGaussian(nn.Module):
             sigma = logits[:, :, int(feature_size/2):] + eps
         elif logits.dim() == 4:
             feature_size = logits.size(1)
-            assert feature_size % 2 == 0 and feature_size // 2 == self.output_size
+            assert feature_size % 2 == 0 and feature_size // 2 == self.output_size, \
+                "feature_size = {}".format(feature_size)
             mu = logits[:, 0:int(feature_size/2), :, :]
             sigma = logits[:, int(feature_size/2):, :, :] + eps
         else:
@@ -114,11 +153,11 @@ class IsotropicGaussian(nn.Module):
         :rtype: torch.Tensor
 
         """
-        z_true = D.Normal(params['gaussian']['mu'],
+        z_given_x = D.Normal(params['gaussian']['mu'],
                           params['gaussian']['logvar'])
-        z_match = D.Normal(params['q_z_given_xhat']['gaussian']['mu'],
+        z_given_xhat = D.Normal(params['q_z_given_xhat']['gaussian']['mu'],
                            params['q_z_given_xhat']['gaussian']['logvar'])
-        kl_proxy_to_xent = torch.sum(D.kl_divergence(z_match, z_true), dim=-1)
+        kl_proxy_to_xent = torch.sum(D.kl_divergence(z_given_x, z_given_xhat), dim=-1)
         return self.config['continuous_mut_info'] * kl_proxy_to_xent
 
     @staticmethod
@@ -164,8 +203,8 @@ class IsotropicGaussian(nn.Module):
         :rtype: torch.Tensor
 
         """
-        return D.Normal(params['gaussian']['mu'],
-                        params['gaussian']['logvar']).log_prob(z)
+        return -(0.5 * np.log(2 * np.pi) + params['gaussian']['logvar']) \
+            - 0.5 * ((z - params['gaussian']['mu']) / torch.exp(params['gaussian']['logvar'])) ** 2
 
     def forward(self, logits, force=False):
         """ Returns a reparameterized gaussian and it's params.

@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 
-from helpers.utils import float_type, ones_like
+from helpers.utils import float_type, ones_like, nan_check_and_break
 from .beta import Beta
 from .gumbel import GumbelSoftmax
 from .isotropic_gaussian import IsotropicGaussian
@@ -40,6 +40,36 @@ class Mixture(nn.Module):
         """
         return self.discrete.get_reparameterizer_scalars()
 
+    def prior_params(self, batch_size, **kwargs):
+        """ Helper to get prior parameters
+
+        :param batch_size: the size of the batch
+        :returns: a dictionary of parameters
+        :rtype: dict
+
+        """
+        cont_params = self.continuous.prior_params(batch_size, **kwargs)
+        disc_params = self.discrete.prior_params(batch_size, **kwargs)
+        return {
+            **disc_params,
+            **cont_params
+        }
+
+    def prior_distribution(self, batch_size, **kwargs):
+        """ get a torch distrbiution prior
+
+        :param batch_size: size of the prior
+        :returns: uniform categorical
+        :rtype: torch.distribution
+
+        """
+        disc_dist = self.discrete.prior_distribution(batch_size, **kwargs)
+        cont_dist = self.continuous.prior_distribution(batch_size, **kwargs)
+        return {
+            'continuous': cont_dist,
+            'discrete': disc_dist
+        }
+
     def prior(self, batch_size, **kwargs):
         disc = self.discrete.prior(batch_size, **kwargs)
         cont = self.continuous.prior(batch_size, **kwargs)
@@ -53,6 +83,13 @@ class Mixture(nn.Module):
     def log_likelihood(self, z, params):
         cont = self.continuous.log_likelihood(z[:, 0:self.continuous.output_size], params)
         disc = self.discrete.log_likelihood(z[:, self.continuous.output_size:], params)
+        if disc.dim() < 2:
+            disc = disc.unsqueeze(-1)
+
+        # sanity check and return
+        nan_check_and_break(cont, 'cont_ll')
+        nan_check_and_break(disc, 'disc_ll')
+
         return torch.cat([cont, disc], 1)
 
     def reparmeterize(self, logits, force=False):

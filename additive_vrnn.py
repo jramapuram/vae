@@ -37,11 +37,13 @@ class AdditiveVRNN(VRNN):
         self.memory.init_state(batch_size, input_t.is_cuda) # always re-init state at first step.
         for i in range(self.config['max_time_steps']):
             if isinstance(input_t, list):  # if we have many inputs as a list
-                decode_i, params_i = self.step(input_t[i])
-                input_t[-1] = decode_i if i == 0 else decode_i + input_t[i]
+                decode_t, params_t = self.step(input_t[i])
+                decode_activated_t = nll_activation_fn(decode_t, self.config['nll_type'])
+                input_t[-1] = decode_activated_t if i == 0 else decode_activated_t + input_t[i]
             else:                          # single input encoded many times
                 decode_t, params_t = self.step(input_t)
-                input_t = decode_t if i == 0 else decode_t + input_t
+                decode_activated_t = nll_activation_fn(decode_t, self.config['nll_type'])
+                input_t = decode_activated_t if i == 0 else decode_activated_t + input_t
 
             if self.training and i == 0:
                 self.aggregate_posterior['rnn_hidden_state_h'](self.memory.get_state()[0])
@@ -83,6 +85,7 @@ class AdditiveVRNN(VRNN):
         # iterate max_time_steps -1  times using the output from above
         for _ in range(self.config['max_time_steps'] - 1):
             dec_output_tp1, _ = self.step(dec_output_t, **kwargs)
+            dec_output_tp1 = nll_activation_fn(dec_output_tp1, self.config['nll_type'])
             dec_output_t = dec_output_t + dec_output_tp1
             decoded_list.append(dec_output_t.clone())
 

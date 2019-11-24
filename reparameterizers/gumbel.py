@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.distributions as D
 from torch.autograd import Variable
 
-from helpers.utils import float_type, one_hot, ones_like, long_type
+from helpers.utils import same_type, one_hot, ones_like, long_type, get_dtype
 
 
 class GumbelSoftmax(nn.Module):
@@ -28,6 +28,34 @@ class GumbelSoftmax(nn.Module):
         self.input_size = self.config['discrete_size']
         self.output_size = self.config['discrete_size']
 
+    def prior_params(self, batch_size, **kwargs):
+        """ Helper to get prior parameters
+
+        :param batch_size: the size of the batch
+        :returns: a dictionary of parameters
+        :rtype: dict
+
+        """
+        uniform_probs = same_type(self.config['half'], self.config['cuda'])(
+            batch_size, self.output_size).zero_()
+        uniform_probs += 1.0 / self.output_size
+        return {
+            'discrete':{
+                'logits': D.OneHotCategorical(probs=uniform_probs).logits
+            }
+        }
+
+    def prior_distribution(self, batch_size, **kwargs):
+        """ get a torch distrbiution prior
+
+        :param batch_size: size of the prior
+        :returns: uniform categorical
+        :rtype: torch.distribution
+
+        """
+        params = self.prior_params(batch_size, **kwargs)
+        return D.OneHotCategorical(logits=params['discrete']['logits'])
+
     def prior(self, batch_size, **kwargs):
         """ Sample the prior for batch_size samples.
 
@@ -36,13 +64,8 @@ class GumbelSoftmax(nn.Module):
         :rtype: torch.Tensor
 
         """
-        uniform_probs = float_type(self.config['cuda'])(1, self.output_size).zero_()
-        uniform_probs += 1.0 / self.output_size
-        cat = torch.distributions.Categorical(uniform_probs)
-        sample = cat.sample((batch_size,))
-        return Variable(
-            one_hot(self.output_size, sample, use_cuda=self.config['cuda'])
-        ).type(float_type(self.config['cuda']))
+        cat = self.prior_distribution(batch_size, **kwargs)
+        return cat.sample()
 
     def get_reparameterizer_scalars(self):
         """ Returns any scalars used in reparameterization.
@@ -109,8 +132,10 @@ class GumbelSoftmax(nn.Module):
         :rtype: torch.Tensor
 
         """
-        targets = torch.argmax(params['discrete']['z_hard'].type(long_type(self.config['cuda'])), dim=-1)
-        crossent_loss = -F.cross_entropy(input=params['q_z_given_xhat']['discrete']['logits'],
+        targets = torch.argmax(
+            F.softmax(params['discrete']['logits'], -1), dim=-1
+        ).type(long_type(self.config['cuda']))
+        crossent_loss = F.cross_entropy(input=params['q_z_given_xhat']['discrete']['logits'],
                                          target=targets, reduce=False)
         ent_loss = -torch.sum(D.OneHotCategorical(logits=params['discrete']['z_hard']).entropy(), -1)
         return ent_loss + crossent_loss
@@ -125,12 +150,10 @@ class GumbelSoftmax(nn.Module):
         :rtype: torch.Tensor
 
         """
-        log_q_z_given_x = params['q_z_given_xhat']['discrete']['logits'] + eps
-        # log_q_z_given_x = params['discrete']['log_q_z'] + eps
-        p_z = self.prior(log_q_z_given_x.size()[0])
-        # p_z = params['discrete']['z_soft'] + eps
-        crossent_loss = -torch.sum(log_q_z_given_x * p_z, dim=-1)
-        ent_loss = -torch.sum(torch.log(p_z + eps) * p_z, dim=-1)
+        log_q_z_given_x_hat = params['q_z_given_xhat']['discrete']['log_q_z']
+        p_z = F.softmax(params['discrete']['logits'], dim=-1)
+        crossent_loss = torch.sum(p_z * log_q_z_given_x_hat, dim=-1)
+        ent_loss = -torch.sum(p_z * params['discrete']['log_q_z'], dim=-1)
         return ent_loss + crossent_loss
 
     def mutual_info(self, params, eps=1e-9):
@@ -142,15 +165,42 @@ class GumbelSoftmax(nn.Module):
         :rtype: torch.Tensor
 
         """
-        targets = torch.argmax(params['discrete']['z_hard'].type(long_type(self.config['cuda'])), dim=-1)
+        return self.config['discrete_mut_info']*self.mutual_info_monte_carlo(params)
+
+        targets = torch.argmax(params['q_z_given_xhat']['discrete']['z_hard'].type(
+            long_type(self.config['cuda'])), dim=-1)
         # soft_targets = F.softmax(
         #     params['discrete']['logits'], -1
         # ).type(long_type(self.config['cuda']))
         # targets = torch.argmax(params['discrete']['log_q_z'], -1) # 3rd change, havent tried
-        crossent_loss = -F.cross_entropy(input=params['q_z_given_xhat']['discrete']['logits'],
+        #crossent_loss = -F.cross_entropy(input=params['q_z_given_xhat']['discrete']['logits'],
+        crossent_loss = -F.cross_entropy(input=params['discrete']['logits'],
                                          target=targets, reduce=False)
-        ent_loss = -torch.sum(D.OneHotCategorical(logits=params['discrete']['z_hard']).entropy(), -1)
-        return self.config['discrete_mut_info'] * (ent_loss + crossent_loss)
+        # ent_loss = -torch.sum(D.OneHotCategorical(logits=params['discrete']['z_hard']).entropy(), -1)
+        #ent_loss = torch.sum(D.OneHotCategorical(logits=params['discrete']['z_hard']).entropy(), -1)
+        #print('xent = ', crossent_loss.shape, " |ent = ", ent_loss.shape)
+        ent_loss = -torch.sum(D.OneHotCategorical(logits=params['discrete']['logits']).entropy(), -1)
+        return -self.config['discrete_mut_info'] * (ent_loss + crossent_loss)
+        # return self.config['discrete_mut_info'] * crossent_loss
+
+    # def mutual_info(self, params, eps=1e-9):
+    #     """ Returns Ent + xent where xent is taken against hard targets.
+
+    #     :param params: distribution parameters
+    #     :param eps: tolerance
+    #     :returns: batch_size tensor of mutual info
+    #     :rtype: torch.Tensor
+
+    #     """
+    #     targets = torch.argmax(params['discrete']['z_hard'].type(long_type(self.config['cuda'])), dim=-1)
+    #     # soft_targets = F.softmax(
+    #     #     params['discrete']['logits'], -1
+    #     # ).type(long_type(self.config['cuda']))
+    #     # targets = torch.argmax(params['discrete']['log_q_z'], -1) # 3rd change, havent tried
+    #     crossent_loss = -F.cross_entropy(input=params['q_z_given_xhat']['discrete']['logits'],
+    #                                      target=targets, reduce=False)
+    #     ent_loss = -torch.sum(D.OneHotCategorical(logits=params['discrete']['z_hard']).entropy(), -1)
+    #     return self.config['discrete_mut_info'] * (ent_loss + crossent_loss)
 
     @staticmethod
     def _kld_categorical_uniform(log_q_z, dim=-1, eps=1e-9):
@@ -169,6 +219,15 @@ class GumbelSoftmax(nn.Module):
         kld_element = log_q_z.exp() * (log_q_z - log_p_z)
         return kld_element
 
+
+    @staticmethod
+    def _kl_tf_version(a, b):
+        ''' nn_ops.softmax(a.logits)*(nn_ops.log_softmax(a.logits)
+            - nn_ops.log_softmax(b.logits))
+        '''
+        return F.softmax(a.logits, dim=-1)*(F.log_softmax(a.logits, dim=-1)
+                                            - F.log_softmax(b.logits, dim=-1))
+
     def kl(self, dist_a, prior=None):
         """ KL divergence of dist_a against a prior, if none then Cat(1/k)
 
@@ -179,15 +238,21 @@ class GumbelSoftmax(nn.Module):
 
         """
         if prior == None:  # use standard uniform prior
-            return torch.sum(GumbelSoftmax._kld_categorical_uniform(
-                dist_a['discrete']['log_q_z'], dim=self.dim
+            # return torch.sum(GumbelSoftmax._kld_categorical_uniform(
+            #     dist_a['discrete']['log_q_z'], dim=self.dim
+            # ), -1)
+            prior = D.OneHotCategorical(logits=dist_a['discrete']['log_q_z'])
+            return torch.sum(GumbelSoftmax._kl_tf_version(
+                D.OneHotCategorical(logits=dist_a['discrete']['log_q_z']),
+                prior
             ), -1)
 
         # we have two distributions provided (eg: VRNN)
-        return D.kl_divergence(
+        return torch.sum(GumbelSoftmax._kl_tf_version(
             D.OneHotCategorical(logits=dist_a['discrete']['log_q_z']),
-            D.OneHotCategorical(prior['discrete']['log_q_z'])
-        )
+            #D.OneHotCategorical(prior['discrete']['log_q_z'])
+            D.OneHotCategorical(logits=prior['discrete']['log_q_z'])
+        ), -1)
 
 
     @staticmethod
@@ -232,7 +297,7 @@ class GumbelSoftmax(nn.Module):
         if hard:
             y_max, _ = torch.max(y, dim=dim, keepdim=True)
             y_hard = Variable(
-                torch.eq(y_max.data, y.data).type(float_type(use_cuda))
+                torch.eq(y_max.data, y.data).type(x.dtype)
             )
             y_hard_diff = y_hard - y
             y_hard = y_hard_diff.detach() + y
@@ -249,7 +314,7 @@ class GumbelSoftmax(nn.Module):
         :rtype: torch.Tensor
 
         """
-        return D.Categorical(logits=params['discrete']['logits']).log_prob(z)
+        return D.OneHotCategorical(logits=params['discrete']['logits']).log_prob(z)
 
     def forward(self, logits, force=False):
         """ Returns a reparameterized categorical and it's params.
