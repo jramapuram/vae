@@ -46,7 +46,7 @@ class VarianceProjector(nn.Module):
             #     #nn.Parameter(torch.zeros(1))
             # )
             if config['decoder_layer_type'] in ['conv', 'coordconv', 'resnet']:
-		self.decoder_projector = nn.Sequential(
+                self.decoder_projector = nn.Sequential(
                     activation_fn(),
                     # nn.ConvTranspose2d(chans, chans*2, 1, stride=1, bias=False)
                     nn.Conv2d(chans, chans*2, 1, stride=1, bias=False)
@@ -63,13 +63,15 @@ class VarianceProjector(nn.Module):
 
     def forward(self, x):
         if hasattr(self, 'decoder_projector'):
-            assert x.dim() == 4, "got greater than 4d, why?"
-            decoded = self.decoder_projector(x)
-            half_chans = decoded.shape[1] // 2
-            return torch.cat([decoded[:, 0:half_chans, :, :],    # clamp the variance below with sigm
-                              decoded[:, half_chans:, :, :]], 1)
-                              # torch.sigmoid(decoded[:, half_chans:, :, :])], 1)
-                              # F.softplus(decoded[:, half_chans:, :, :], beta=1)], 1)
+            if x.dim() == 4:
+                decoded = self.decoder_projector(x)
+                half_chans = decoded.shape[1] // 2
+                return torch.cat([decoded[:, 0:half_chans, :, :],    # clamp the variance below with sigm
+                                  decoded[:, half_chans:, :, :]], 1)
+                                  # torch.sigmoid(decoded[:, half_chans:, :, :])], 1)
+                                  # F.softplus(decoded[:, half_chans:, :, :], beta=1)], 1)
+            else:
+                raise Exception("unknown dims for Variance projector")
 
         return x
 
