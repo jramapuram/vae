@@ -3,9 +3,9 @@ from .vrnn import VRNN
 from .additive_vrnn import AdditiveVRNN
 from .simple_vae import SimpleVAE
 from .autoencoder import Autoencoder, VAENoKL
-from .symmetric_simple_vae import SymmetricSimpleVAE
 from .parallelly_reparameterized_vae import ParallellyReparameterizedVAE
 from .sequentially_reparameterized_vae import SequentiallyReparameterizedVAE
+
 
 def build_vae(vae_type_str):
     """ Simple helper to return the correct VAE class.
@@ -22,7 +22,6 @@ def build_vae(vae_type_str):
         'msg': MSGVAE,
         'vrnn': VRNN,
         'additive_vrnn': AdditiveVRNN,
-        'symmetric_simple': SymmetricSimpleVAE,
         'parallel': ParallellyReparameterizedVAE,
         'sequential': SequentiallyReparameterizedVAE
     }

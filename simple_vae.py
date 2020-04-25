@@ -1,13 +1,6 @@
 from __future__ import print_function
 
-from functools import partial
-
-from helpers.layers import str_to_activ_module
-from .reparameterizers.gumbel import GumbelSoftmax
-from .reparameterizers.mixture import Mixture
-from .reparameterizers.beta import Beta
-from .reparameterizers.bernoulli import Bernoulli
-from .reparameterizers.isotropic_gaussian import IsotropicGaussian
+from .reparameterizers import get_reparameterizer
 from .abstract_vae import AbstractVAE
 
 
@@ -21,25 +14,8 @@ class SimpleVAE(AbstractVAE):
 
         """
         super(SimpleVAE, self).__init__(input_shape, **kwargs)
-        reparam_dict = {
-            'beta': Beta,
-            'bernoulli': Bernoulli,
-            'discrete': GumbelSoftmax,
-            'isotropic_gaussian': IsotropicGaussian,
-            'mixture': partial(Mixture, num_discrete=self.config['discrete_size'],
-                               num_continuous=self.config['continuous_size'])
-        }
-        self.reparameterizer = reparam_dict[self.config['reparam_type']](config=self.config)
+        self.reparameterizer = get_reparameterizer(self.config['reparam_type'])(config=self.config)
 
         # build the encoder and decoder
         self.encoder = self.build_encoder()
         self.decoder = self.build_decoder()
-
-    def has_discrete(self):
-        """ Returns true if there is a discrete reparameterization.
-
-        :returns: True/False
-        :rtype: bool
-
-        """
-        return isinstance(self.reparameterizer, (GumbelSoftmax, Mixture))

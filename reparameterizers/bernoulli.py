@@ -1,19 +1,17 @@
 from __future__ import print_function
 import math
-import pprint
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.distributions as D
-from torch.autograd import Variable
 
-from helpers.utils import float_type, one_hot, ones_like, long_type
+from helpers.utils import same_type
 
 
 class Bernoulli(nn.Module):
     def __init__(self, config, dim=-1):
         super(Bernoulli, self).__init__()
+        self.is_discrete = True
         self.dim = dim
         self.iteration = 0
         self.config = config
@@ -32,7 +30,7 @@ class Bernoulli(nn.Module):
         uniform_probs = same_type(self.config['half'], self.config['cuda'])(1, self.output_size).zero_()
         uniform_probs += 0.5
         return {
-            'discrete':{
+            'discrete': {
                 'logits': D.Bernoulli(probs=uniform_probs).logits
             }
         }
@@ -121,8 +119,8 @@ class Bernoulli(nn.Module):
         hard = relaxed.clone()
         hard[relaxed < 0.5] = 0.0
         hard[relaxed >= 0.5] = 1.0
-        hard_diff = hard - relaxed # sub the relaxed tensor backprop path
-        return hard_diff.detach() + relaxed # add back for 0 effect, keeping bp path
+        hard_diff = hard - relaxed  # sub the relaxed tensor backprop path
+        return hard_diff.detach() + relaxed  # add back for 0 effect, keeping bp path
 
     def reparmeterize(self, logits):
         """ reparamterize the logits
@@ -180,8 +178,6 @@ class Bernoulli(nn.Module):
         :rtype: torch.Tensor
 
         """
-        batch_size = dist_a['discrete']['logits'].shape[0]
-
         if prior is None:  # use standard uniform prior
             prior_probs = torch.zeros_like(dist_a['discrete']['logits']) + 0.5
             prior = D.Bernoulli(probs=prior_probs)
@@ -197,8 +193,9 @@ class Bernoulli(nn.Module):
         return D.Bernoulli(logits=params['discrete']['logits']).log_prob(z)
 
     def forward(self, logits, force=False):
-        #self.cosine_anneal()  # anneal first
-        self.anneal()
+        # self.cosine_anneal()  # anneal first
+        self.anneal()           # anneal first
+
         z, z_hard = self.reparmeterize(logits)
         params = {
             'z_hard': z_hard,
@@ -208,8 +205,7 @@ class Bernoulli(nn.Module):
         self.iteration += 1
 
         if self.training or force:
-            # return the reparameterization
-            # and the params of gumbel
-            return z, { 'z': z, 'logits': logits, 'discrete': params }
+            # return the reparameterization and the params of gumbel
+            return z, {'z': z, 'logits': logits, 'discrete': params}
 
-        return z_hard, { 'z': z, 'logits': logits, 'discrete': params }
+        return z_hard, {'z': z, 'logits': logits, 'discrete': params}

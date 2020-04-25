@@ -1,11 +1,9 @@
 import math
-import types
 
 import numpy as np
 import scipy as sp
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 # All the following flows are taken / modified from :
 # https://github.com/ikostrikov/pytorch-flows/blob/master/flows.py
@@ -41,7 +39,7 @@ class FlowSequential(nn.Sequential):
 
         return inputs, logdets
 
-    def log_probs(self, inputs, cond_inputs = None):
+    def log_probs(self, inputs, cond_inputs=None):
         u, log_jacob = self(inputs, cond_inputs)
         log_probs = (-0.5 * u.pow(2) - 0.5 * math.log(2 * math.pi)).sum(
             -1, keepdim=True)
@@ -71,7 +69,7 @@ class ActNorm(nn.Module):
         self.initialized = False
 
     def forward(self, inputs, cond_inputs=None, mode='direct'):
-        if self.initialized == False:
+        if self.initialized is False:
             self.weight.data.copy_(torch.log(1.0 / (inputs.std(0) + 1e-12)))
             self.bias.data.copy_(inputs.mean(0))
             self.initialized = True
@@ -132,17 +130,17 @@ class LUInvertibleMM(nn.Module):
         self.sign_S = torch.from_numpy(sign_S)
         self.log_S = nn.Parameter(torch.from_numpy(log_S))
 
-        self.I = torch.eye(self.L.size(0))
+        self.eye = torch.eye(self.L.size(0))
 
     def forward(self, inputs, cond_inputs=None, mode='direct'):
         if str(self.L_mask.device) != str(self.L.device):
             self.L_mask = self.L_mask.to(self.L.device)
             self.U_mask = self.U_mask.to(self.L.device)
-            self.I = self.I.to(self.L.device)
+            self.eye = self.eye.to(self.L.device)
             self.P = self.P.to(self.L.device)
             self.sign_S = self.sign_S.to(self.L.device)
 
-        L = self.L * self.L_mask + self.I
+        L = self.L * self.L_mask + self.eye
         U = self.U * self.U_mask + torch.diag(
             self.sign_S * torch.exp(self.log_S))
         W = self.P @ L @ U

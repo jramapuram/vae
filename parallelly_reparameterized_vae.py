@@ -2,6 +2,7 @@ from __future__ import print_function
 
 from .abstract_vae import AbstractVAE
 from .reparameterizers.concat_reparameterizer import ConcatReparameterizer
+from .reparameterizers import GumbelSoftmax, Mixture
 
 
 class ParallellyReparameterizedVAE(AbstractVAE):
@@ -39,12 +40,3 @@ class ParallellyReparameterizedVAE(AbstractVAE):
 
         # base case, no MI
         return params_list
-
-    def has_discrete(self):
-        """ Returns true if there is a discrete reparameterization.
-
-        :returns: True/False
-        :rtype: bool
-
-        """
-        return isinstance(self.reparameterizer.reparameterizers[0], (GumbelSoftmax, Mixture))
