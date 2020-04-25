@@ -7,10 +7,7 @@ import torch.nn.functional as F
 from copy import deepcopy
 
 from .abstract_vae import AbstractVAE
-from .reparameterizers.gumbel import GumbelSoftmax
-from .reparameterizers.mixture import Mixture
-from .reparameterizers.beta import Beta
-from .reparameterizers.isotropic_gaussian import IsotropicGaussian
+from .reparameterizers import get_reparameterizer
 from helpers.distributions import nll_activation as nll_activation_fn
 from helpers.layers import get_encoder, get_decoder, str_to_activ_module, EMA
 from helpers.utils import add_noise_to_imgs, float_type
@@ -229,30 +226,13 @@ class VRNN(AbstractVAE):
 
         """
         super(VRNN, self).__init__(input_shape, **kwargs)
+        assert self.config['max_time_steps'] > 0, "Need max_time_steps > 0 for VRNN."
         self.activation_fn = str_to_activ_module(self.config['activation'])
         self.bidirectional = bidirectional
         self.n_layers = n_layers
 
         # build the reparameterizer
-        if self.config['reparam_type'] == "isotropic_gaussian":
-            print("using isotropic gaussian reparameterizer")
-            self.reparameterizer = IsotropicGaussian(self.config)
-        elif self.config['reparam_type'] == "discrete":
-            print("using gumbel softmax reparameterizer")
-            self.reparameterizer = GumbelSoftmax(self.config)
-        elif self.config['reparam_type'] == "beta":
-            print("using beta reparameterizer")
-            self.reparameterizer = Beta(self.config)
-        elif "mixture" in self.config['reparam_type']:
-            print("using mixture reparameterizer with {} + discrete".format(
-                'beta' if 'beta' in self.config['reparam_type'] else 'isotropic_gaussian'
-            ))
-            self.reparameterizer = Mixture(num_discrete=self.config['discrete_size'],
-                                           num_continuous=self.config['continuous_size'],
-                                           config=self.config,
-                                           is_beta='beta' in self.config['reparam_type'])
-        else:
-            raise Exception("unknown reparameterization type")
+        self.reparameterizer = get_reparameterizer(self.config['reparam_type'])(self.config)
 
         # keep track of ammortized posterior
         self.aggregate_posterior = nn.ModuleDict({
@@ -379,15 +359,6 @@ class VRNN(AbstractVAE):
 
         # append the variance as necessary
         return self._append_variance_projection(decoder)
-
-    def has_discrete(self):
-        """ Returns true if there is a discrete reparameterization.
-
-        :returns: True/False
-        :rtype: bool
-
-        """
-        return isinstance(self.reparameterizer, (GumbelSoftmax, Mixture))
 
     def _build_rnn_memory_model(self, input_size, model_type='lstm', bias=True, dropout=0):
         """ Builds an RNN Memory Model. Currently restricted to LSTM.

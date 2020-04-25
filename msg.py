@@ -2,14 +2,8 @@ from __future__ import print_function
 
 import torch
 import torch.nn as nn
-from functools import partial
 
-from helpers.layers import str_to_activ_module, get_decoder
-from .reparameterizers.gumbel import GumbelSoftmax
-from .reparameterizers.mixture import Mixture
-from .reparameterizers.beta import Beta
-from .reparameterizers.bernoulli import Bernoulli
-from .reparameterizers.isotropic_gaussian import IsotropicGaussian
+from .reparameterizers import get_reparameterizer
 from .abstract_vae import AbstractVAE
 
 
@@ -23,26 +17,14 @@ class MSGVAE(AbstractVAE):
 
         """
         super(MSGVAE, self).__init__(input_shape, **kwargs)
-        reparam_dict = {
-            'beta': Beta,
-            'bernoulli': Bernoulli,
-            'discrete': GumbelSoftmax,
-            'isotropic_gaussian': IsotropicGaussian,
-            'mixture': partial(Mixture, num_discrete=self.config['discrete_size'],
-                               num_continuous=self.config['continuous_size'])
-        }
-        self.reparameterizer = reparam_dict[self.config['reparam_type']](config=self.config)
+        self.reparameterizer = get_reparameterizer(self.config['reparam_type'])(config=self.config)
 
         # build the encoder and decoder
         self.encoder = self.build_encoder()
         self.decoder = self.build_decoder()
 
         # build the gates
-        self.gates = nn.ModuleList([get_decoder(self.config, reupsample=True, name='gate_{}'.format(i))(
-                                                input_size=self.reparameterizer.output_size,
-                                                output_shape=self.input_shape,
-                                                activation_fn=self.activation_fn)
-                                    for i in range(self.config['max_time_steps'])])
+        self.gates = nn.ModuleList([self.build_decoder() for i in range(self.config['max_time_steps'])])
 
         # over-ride the reparam prior
         self.single_prior = self.reparameterizer.prior
@@ -70,7 +52,7 @@ class MSGVAE(AbstractVAE):
         """
         return self.reparameterizer.kl(dist_list[-1])
 
-    def reparameterize(self, logits):
+    def reparameterize(self, logits, force=False):
         """ Reparameterize the logits and returns a dict.
 
         :param logits: unactivated encoded logits.
@@ -80,13 +62,11 @@ class MSGVAE(AbstractVAE):
         """
         z_list, params_list = [], []
         for _ in range(self.config['max_time_steps']):
-            z, params = self.reparameterizer(logits)
-            z_list.append(z); params_list.append(params)
+            z, params = self.reparameterizer(logits, force=force)
+            z_list.append(z)
+            params_list.append(params)
 
         return z_list, params_list
-
-        # return zip(*[self.reparameterizer(logits)
-        #              for _ in range(self.config['max_time_steps'])])
 
     def decode(self, z, x=None):
         """ Decode a set of latent z back to x_mean.
@@ -97,12 +77,11 @@ class MSGVAE(AbstractVAE):
 
         """
         assert isinstance(z, (list, tuple)), "expecting a tuple or list"
-        gate_encodes = [torch.sigmoid(g(z_i)) for g, z_i in zip(self.gates, z)]
-        return torch.mean(torch.cat([(g_i * self.decoder(z_i.contiguous())).unsqueeze(0)
-                                     for z_i, g_i in zip(z, gate_encodes)], 0), 0)
-        # if self.training:
-        #     return torch.mean(torch.cat([(g_i * self.decoder(z_i.contiguous())).unsqueeze(0)
-        #                                  for z_i, g_i in zip(z, self.gate_encodes)], 0), 0)
+        if self.training:
+            gate_encodes = [torch.sigmoid(g(z_i)) for g, z_i in zip(self.gates, z)]
+            return torch.mean(torch.cat([(g_i * self.decoder(z_i.contiguous())).unsqueeze(0)
+                                         for z_i, g_i in zip(z, gate_encodes)], 0), 0)
 
-
-        # return torch.mean(torch.cat([self.decoder(z_i.contiguous()).unsqueeze(0) for z_i in z], 0), 0)
+        # At inference just return a single sample
+        # return torch.sigmoid(self.gates[0](z[0])) * self.decoder(z[0].contiguous())
+        return self.decoder(z[0].contiguous())
