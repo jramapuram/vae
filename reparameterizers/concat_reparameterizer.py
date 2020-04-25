@@ -1,21 +1,9 @@
 from __future__ import print_function
-import pprint
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from copy import deepcopy
-from torch.autograd import Variable
-from functools import partial
-
-from helpers.utils import float_type, zeros, get_dtype
-from helpers.layers import get_encoder, str_to_activ_module
-from .beta import Beta
-from .bernoulli import Bernoulli
-from .gumbel import GumbelSoftmax
-from .mixture import Mixture
-from .isotropic_gaussian import IsotropicGaussian
+import models.vae.reparameterizers as reparameterizers
 
 
 class ConcatReparameterizer(nn.Module):
@@ -31,9 +19,9 @@ class ConcatReparameterizer(nn.Module):
         self.config = config
         self.reparam_strs = reparam_strs
         self.reparameterizers = nn.ModuleList(self._generate_reparameterizers())
-        print(self.reparameterizers)
-        self.input_size = np.sum([r.input_size for r in self.reparameterizers])
-        self.output_size = np.sum([r.output_size for r in self.reparameterizers])
+        print('\nreparameterizers: {}\n'.format(self.reparameterizers))
+        self.input_size = int(np.sum([r.input_size for r in self.reparameterizers]))
+        self.output_size = int(np.sum([r.output_size for r in self.reparameterizers]))
 
         # to enumerate over for reparameterization
         self._input_sizing = [0] + list(np.cumsum([r.input_size for r in self.reparameterizers]))
@@ -45,17 +33,9 @@ class ConcatReparameterizer(nn.Module):
         :rtype: list
 
         """
-        reparam_dict = {
-            'beta': Beta,
-            'bernoulli': Bernoulli,
-            'discrete': GumbelSoftmax,
-            'isotropic_gaussian': IsotropicGaussian,
-            'mixture': partial(Mixture, num_discrete=self.config['discrete_size'],
-                               num_continuous=self.config['continuous_size'])
-        }
-
         # build the base reparameterizers
-        return [reparam_dict[reparam](config=self.config) for reparam in self.reparam_strs]
+        return [reparameterizers.get_reparameterizer(reparam)(config=self.config)
+                for reparam in self.reparam_strs]
 
     def get_reparameterizer_scalars(self):
         """ Return all scalars from the reparameterizers (eg: tau in gumbel)
@@ -66,13 +46,12 @@ class ConcatReparameterizer(nn.Module):
         """
         reparam_scalar_map = {}
         for i, reparam in enumerate(self.reparameterizers):
-            if isinstance(reparam, GumbelSoftmax):
-                reparam_scalar_map['tau%d_scalar'%i] = reparam.tau
-            elif isinstance(reparam, Mixture):
-                reparam_scalar_map['tau%d_scalar'%i] = reparam.discrete.tau
+            current_scalars_map = reparam.get_reparameterizer_scalars()
+            for k, v in current_scalars_map.items():
+                key_update = "{}{}".format(i, k)
+                reparam_scalar_map[key_update] = v
 
         return reparam_scalar_map
-
 
     def mutual_info(self, dists):
         """ concatenates all the mutual infos together and returns.
@@ -88,7 +67,6 @@ class ConcatReparameterizer(nn.Module):
             mi = reparam.mutual_info(param) if mi is None else mi + reparam.mutual_info(param)
 
         return mi
-
 
     def kl(self, dists, priors=None):
         """ concatenates all the KLs together and returns
@@ -108,7 +86,7 @@ class ConcatReparameterizer(nn.Module):
 
         return kl
 
-    def reparameterize(self, logits, force=False):
+    def forward(self, logits, force=False):
         """ execute the reparameterization layer-by-layer returning ALL params and last reparam logits.
 
         :param logits: the input logits
@@ -119,17 +97,24 @@ class ConcatReparameterizer(nn.Module):
         params_list = []
         reparameterized = []
 
+        # determine which dimension we slice over
+        dim_map = {
+            2: -1,  # [B, F]
+            3: -1,  # [B, T, F] --> TODO: do we want to slice time or feature?
+            4: 1    # [B, C, H, W]
+        }
+        assert logits.dim() in dim_map, "unknown number of dims for concat reparam"
+        dim2slice = dim_map[logits.dim()]
+
         for i, (begin, end) in enumerate(zip(self._input_sizing, self._input_sizing[1:])):
             # print("reparaming from {} to {} for {}-th reparam which is a {} with shape {}".format(
             #     begin, end, i, self.reparameterizers[i], logits[:, begin:end].shape))
-            reparameterized_i, params = self.reparameterizers[i](logits[:, begin:end], force=force)
-            reparameterized.append(reparameterized_i)
+            logits_i = torch.narrow(logits, dim2slice, begin, end-begin)
+            reparameterized_i, params = self.reparameterizers[i](logits_i, force=force)
+            reparameterized.append(reparameterized_i.clone())
             params_list.append({**params, 'logits': logits[:, begin:end]})
 
         return torch.cat(reparameterized, -1), params_list
-
-    def forward(self, logits, force=False):
-        return self.reparameterize(logits, force=force)
 
     def prior(self, batch_size, **kwargs):
         """ Gen the first prior.

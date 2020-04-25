@@ -1,21 +1,10 @@
 from __future__ import print_function
-import pprint
-import numpy as np
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from copy import deepcopy
-from torch.autograd import Variable
-from functools import partial
 
-from helpers.utils import float_type, ones_like
-from helpers.layers import get_encoder, str_to_activ_module
-from .beta import Beta
-from .bernoulli import Bernoulli
-from .gumbel import GumbelSoftmax
-from .mixture import Mixture
-from .isotropic_gaussian import IsotropicGaussian
+import models.vae.reparameterizers as reparameterizers
+from helpers.layers import get_encoder
 
 
 class SequentialReparameterizer(nn.Module):
@@ -31,12 +20,12 @@ class SequentialReparameterizer(nn.Module):
         self.config = config
         self.reparam_strs = reparam_strs
         self.reparameterizers = nn.ModuleList(self._generate_reparameterizers())
-        print(self.reparameterizers)
+        print('\nreparameterizers: {}\n'.format(self.reparameterizers))
         self.input_size = self.reparameterizers[0].input_size
         self.output_size = self.reparameterizers[-1][-1].output_size \
             if len(self.reparameterizers) > 1 else self.reparameterizers[-1].output_size
 
-    def _get_dense_net_map(self, name='dense'):
+    def _get_dense_net(self, input_size, name='dense'):
         """ Internal helper to build a dense network
 
         :param name: name of the network
@@ -46,13 +35,14 @@ class SequentialReparameterizer(nn.Module):
         """
         config = deepcopy(self.config)
         config['encoder_layer_type'] = 'dense'
-        return get_encoder(config, name=name)
+        config['input_shape'] = [input_size]
+        return get_encoder(name=name, **config)
 
     def _append_inter_projection(self, reparam, input_size, output_size, name):
         return nn.Sequential(
-            self._get_dense_net_map(name=name)(
-                input_size, output_size, nlayers=2,
-                activation_fn=str_to_activ_module(self.config['activation'])),
+            self._get_dense_net(input_size=input_size, name=name)(
+                output_size=output_size
+            ),
             reparam
         )
 
@@ -63,17 +53,9 @@ class SequentialReparameterizer(nn.Module):
         :rtype: list
 
         """
-        reparam_dict = {
-            'beta': Beta,
-            'bernoulli': Bernoulli,
-            'discrete': GumbelSoftmax,
-            'isotropic_gaussian': IsotropicGaussian,
-            'mixture': partial(Mixture, num_discrete=self.config['discrete_size'],
-                               num_continuous=self.config['continuous_size'])
-        }
-
         # build the base reparameterizers
-        reparam_list = [reparam_dict[reparam](config=self.config) for reparam in self.reparam_strs]
+        reparam_list = [reparameterizers.get_reparameterizer(reparam)(config=self.config)
+                        for reparam in self.reparam_strs]
 
         # tack on dense networks between them
         input_size = reparam_list[0].output_size
@@ -96,13 +78,12 @@ class SequentialReparameterizer(nn.Module):
         reparam_scalar_map = {}
         for i, reparam in enumerate(self.reparameterizers):
             reparam_obj = reparam[-1] if isinstance(reparam, nn.Sequential) else reparam
-            if isinstance(reparam_obj, GumbelSoftmax):
-                reparam_scalar_map['tau%d_scalar'%i] = reparam_obj.tau
-            elif isinstance(reparam_obj, Mixture):
-                reparam_scalar_map['tau%d_scalar'%i] = reparam_obj.discrete.tau
+            current_scalars_map = reparam_obj.get_reparameterizer_scalars()
+            for k, v in current_scalars_map.items():
+                key_update = "{}{}".format(i, k)
+                reparam_scalar_map[key_update] = v
 
         return reparam_scalar_map
-
 
     def mutual_info(self, dists):
         """ Adds all the mutual infos together and returns.
@@ -119,7 +100,6 @@ class SequentialReparameterizer(nn.Module):
             mi = reparam_obj.mutual_info(param) if mi is None else mi + reparam_obj.mutual_info(param)
 
         return mi
-
 
     def kl(self, dists, priors=None):
         """ Adds all the KLs together and returns
@@ -140,7 +120,7 @@ class SequentialReparameterizer(nn.Module):
 
         return kl
 
-    def reparameterize(self, logits, force=False):
+    def forward(self, logits, force=False):
         """ execute the reparameterization layer-by-layer returning ALL params and last logits.
 
         :param logits: the input logits
@@ -149,15 +129,21 @@ class SequentialReparameterizer(nn.Module):
 
         """
         assert force is False, "force not implemented for sequential reparameterizer"
-        params_list = []
-        for reparam in self.reparameterizers:
-            logits, params = reparam(logits)
+
+        # Do the first reparam separately because it doesnt have a dense layer
+        logits, params = self.reparameterizers[0](logits, force=force)
+        params_list = [{**params, 'logits': logits}]
+
+        for reparam in self.reparameterizers[1:]:
+            for layer in reparam:  # iterate over the [repram, dense]
+                if reparameterizers.is_module_a_reparameterizer(layer):
+                    logits, params = layer(logits, force=force)
+                else:
+                    logits = layer(logits)
+
             params_list.append({**params, 'logits': logits})
 
         return logits, params_list
-
-    def forward(self, logits):
-        return self.reparameterize(logits)
 
     def prior(self, batch_size, **kwargs):
         """ Gen the first prior.

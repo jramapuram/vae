@@ -22,16 +22,6 @@ class SequentiallyReparameterizedVAE(AbstractVAE):
         self.encoder = self.build_encoder()
         self.decoder = self.build_decoder()
 
-    def has_discrete(self):
-        """ Returns true if there is a discrete reparameterization
-            for the 0th layer.
-
-        :returns: True/False
-        :rtype: bool
-
-        """
-        return isinstance(self.reparameterizer.reparameterizers[0], (GumbelSoftmax, Mixture))
-
     def _compute_mi_params(self, recon_x_logits, params_list):
         """ Internal helper to compute the MI params and append to full params
 

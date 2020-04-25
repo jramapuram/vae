@@ -1,16 +1,13 @@
 # coding: utf-8
 
 from __future__ import print_function
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributions as D
-import pyro.distributions as PD
-import torch.nn.functional as F
 from torch.autograd import Variable
 
-from helpers.utils import zeros_like, ones_like, same_type
-from helpers.utils import eps as eps_fn
+from helpers.utils import zeros_like, same_type
+# from helpers.utils import eps as eps_fn
 
 
 class Beta(nn.Module):
@@ -23,10 +20,20 @@ class Beta(nn.Module):
 
         """
         super(Beta, self).__init__()
+        self.is_discrete = False
         self.config = config
         self.input_size = self.config['continuous_size']
         assert self.config['continuous_size'] % 2 == 0
         self.output_size = self.config['continuous_size'] // 2
+
+    def get_reparameterizer_scalars(self):
+        """ Returns any scalars used in reparameterization.
+
+        :returns: dict of scalars
+        :rtype: dict
+
+        """
+        return {}
 
     def prior(self, batch_size, **kwargs):
         """ Returns a Kerman beta prior.
@@ -50,7 +57,7 @@ class Beta(nn.Module):
                 batch_size, self.output_size
             ).zero_() + 1/3
         )
-        return PD.Beta(conc1, conc2).sample()
+        return D.Beta(conc1, conc2).sample()
 
     def _reparametrize_beta(self, conc1, conc2, force=False):
         """ Internal function to reparameterize beta distribution using concentrations.
@@ -62,13 +69,11 @@ class Beta(nn.Module):
 
         """
         if self.training or force:
-            # rsample is CPU only ¯\_(ツ)_/¯, see https://tinyurl.com/y9e8mtcd
-            # thus use pyro which DOES have a GPU version
-            beta = PD.Beta(conc1, conc2).rsample()
+            beta = D.Beta(conc1, conc2).rsample()
             return beta, {'conc1': conc1, 'conc2': conc2}
 
         # can't use mean like in gaussian because beta mean can be > 1.0
-        return PD.Beta(conc1, conc2).sample(), {'conc1': conc1, 'conc2': conc2}
+        return D.Beta(conc1, conc2).sample(), {'conc1': conc1, 'conc2': conc2}
 
     def reparmeterize(self, logits, force=False):
         """ Given logits reparameterize to a beta using
@@ -79,17 +84,26 @@ class Beta(nn.Module):
         :rtype: torch.Tensor, dict
 
         """
-        eps = eps_fn(self.config['half'])
-        feature_size = logits.size(-1)
-        assert feature_size % 2 == 0 and feature_size // 2 == self.output_size
-        if logits.dim() == 2:
-            conc1 = torch.sigmoid(logits[:, 0:int(feature_size/2)] + eps)
-            conc2 = torch.sigmoid(logits[:, int(feature_size/2):] + eps)
-        elif logits.dim() == 3:
-            conc1 = torch.sigmoid(logits[:, :, 0:int(feature_size/2)] + eps)
-            conc2 = torch.sigmoid(logits[:, :, int(feature_size/2):] + eps)
-        else:
-            raise Exception("unknown number of dims for isotropic gauss reparam")
+        # eps = eps_fn(self.config['half'])
+
+        # determine which dimension we slice over
+        dim_map = {
+            2: -1,  # [B, F]
+            3: -1,  # [B, T, F] --> TODO: do we want to slice time or feature?
+            4: 1    # [B, C, H, W]
+        }
+        assert logits.dim() in dim_map, "unknown number of dims for isotropic gauss reparam"
+        dim2slice = dim_map[logits.dim()]
+
+        # Compute feature size and do some sanity checks
+        feature_size = logits.shape[dim2slice]
+        assert feature_size % 2 == 0, "feature dimension not divisible by 2 for mu/sigma^2."
+        assert feature_size // 2 == self.output_size, \
+            "feature_size = {} but requested output_size = {}".format(feature_size, self.output_size)
+
+        # Slice the first chunk for concentration1 and the second for concentration2
+        conc1 = torch.sigmoid(torch.narrow(logits, dim2slice, 0, feature_size // 2))
+        conc2 = torch.sigmoid(torch.narrow(logits, dim2slice, feature_size // 2, feature_size // 2))
 
         return self._reparametrize_beta(conc1, conc2, force=force)
 
@@ -102,23 +116,22 @@ class Beta(nn.Module):
         :rtype: torch.Tensor
 
         """
-        prior = PD.Beta(zeros_like(conc1) + 1/3,
-                        zeros_like(conc2) + 1/3)
-        beta = PD.Beta(conc1, conc2)
+        prior = D.Beta(zeros_like(conc1) + 1/3,
+                       zeros_like(conc2) + 1/3)
+        beta = D.Beta(conc1, conc2)
         return torch.sum(D.kl_divergence(beta, prior), -1)
 
     def kl(self, dist_a, prior=None):
-        if prior == None:  # use standard reparamterizer
+        if prior is None:  # use standard reparamterizer
             return self._kld_beta_kerman_prior(
                 dist_a['beta']['conc1'], dist_a['beta']['conc2']
             )
 
         # we have two distributions provided (eg: VRNN)
         return torch.sum(D.kl_divergence(
-            PD.Beta(dist_a['beta']['conc1'], dist_a['beta']['conc2']),
-            PD.Beta(prior['beta']['conc1'], prior['beta']['conc2'])
+            D.Beta(dist_a['beta']['conc1'], dist_a['beta']['conc2']),
+            D.Beta(prior['beta']['conc1'], prior['beta']['conc2'])
         ), -1)
-
 
     def mutual_info(self, params, eps=1e-9):
         """ I(z_d; x) ~ H(z_prior, z_d) + H(z_prior)
@@ -129,10 +142,10 @@ class Beta(nn.Module):
         :rtype: torch.Tensor
 
         """
-        z_true = PD.Beta(params['beta']['conc1'],
-                         params['beta']['conc2'])
-        z_match = PD.Beta(params['q_z_given_xhat']['beta']['conc1'],
-                          params['q_z_given_xhat']['beta']['conc2'])
+        z_true = D.Beta(params['beta']['conc1'],
+                        params['beta']['conc2'])
+        z_match = D.Beta(params['q_z_given_xhat']['beta']['conc1'],
+                         params['q_z_given_xhat']['beta']['conc2'])
         kl_proxy_to_xent = torch.sum(D.kl_divergence(z_match, z_true), dim=-1)
         return self.config['continuous_mut_info'] * kl_proxy_to_xent
 
@@ -145,8 +158,8 @@ class Beta(nn.Module):
         :rtype: torch.Tensor
 
         """
-        return PD.Beta(params['beta']['conc1'],
-                       params['beta']['conc2']).log_prob(z)
+        return D.Beta(params['beta']['conc1'],
+                      params['beta']['conc2']).log_prob(z)
 
     def forward(self, logits, force=False):
         """ Returns a reparameterized gaussian and it's params.
@@ -159,4 +172,4 @@ class Beta(nn.Module):
         z, beta_params = self.reparmeterize(logits, force=force)
         beta_params['conc1_mean'] = torch.mean(beta_params['conc1'])
         beta_params['conc2_mean'] = torch.mean(beta_params['conc2'])
-        return z, { 'z': z, 'logits': logits, 'beta':  beta_params }
+        return z, {'z': z, 'logits': logits, 'beta':  beta_params}

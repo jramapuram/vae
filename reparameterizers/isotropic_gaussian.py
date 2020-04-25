@@ -3,11 +3,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributions as D
-import torch.nn.functional as F
 from torch.autograd import Variable
 
 from helpers.utils import zeros_like, ones_like, same_type, \
-    float_type, nan_check_and_break, is_half, zeros
+    nan_check_and_break, is_half
 from helpers.utils import eps as eps_fn
 
 
@@ -21,6 +20,7 @@ class IsotropicGaussian(nn.Module):
 
         """
         super(IsotropicGaussian, self).__init__()
+        self.is_discrete = False
         self.config = config
         self.input_size = self.config['continuous_size']
         assert self.config['continuous_size'] % 2 == 0
@@ -36,7 +36,7 @@ class IsotropicGaussian(nn.Module):
         """
         mu = same_type(self.config['half'], self.config['cuda'])(
             batch_size, self.output_size
-        ).zero_() # zero mean
+        ).zero_()  # zero mean
 
         # variance = 1 unless otherwise specified
         scale_var = 1.0 if 'scale_var' not in kwargs else kwargs['scale_var']
@@ -86,7 +86,7 @@ class IsotropicGaussian(nn.Module):
         :rtype: torch.Tensor, dict
 
         """
-        if self.training or force: # returns a stochastic sample for training
+        if self.training or force:  # returns a stochastic sample for training
             std = logvar.mul(0.5).exp()
             eps = same_type(is_half(logvar), logvar.is_cuda)(
                 logvar.size()
@@ -108,31 +108,30 @@ class IsotropicGaussian(nn.Module):
         :rtype: torch.Tensor, dict
 
         """
-        eps = eps_fn(self.config['half'])
+        # determine which dimension we slice over
+        dim_map = {
+            2: -1,  # [B, F]
+            3: -1,  # [B, T, F] --> TODO: do we want to slice time or feature?
+            4: 1    # [B, C, H, W]
+        }
+        assert logits.dim() in dim_map, "unknown number of dims for isotropic gauss reparam"
+        dim2slice = dim_map[logits.dim()]
 
-        if logits.dim() == 2:
-            feature_size = logits.size(-1)
-            assert feature_size % 2 == 0 and feature_size // 2 == self.output_size, \
-                "feature_size = {}".format(feature_size)
-            mu = logits[:, 0:int(feature_size/2)]
-            nan_check_and_break(mu, "mu")
-            sigma = logits[:, int(feature_size/2):] + eps
-            # sigma = F.softplus(logits[:, int(feature_size/2):]) + eps
-            # sigma = F.hardtanh(logits[:, int(feature_size/2):], min_val=-6.,max_val=2.)
-        elif logits.dim() == 3: # time or bmm type problem
-            feature_size = logits.size(-1)
-            assert feature_size % 2 == 0 and feature_size // 2 == self.output_size
-            mu = logits[:, :, 0:int(feature_size/2)]
-            sigma = logits[:, :, int(feature_size/2):] + eps
-        elif logits.dim() == 4:
-            feature_size = logits.size(1)
-            assert feature_size % 2 == 0 and feature_size // 2 == self.output_size, \
-                "feature_size = {}".format(feature_size)
-            mu = logits[:, 0:int(feature_size/2), :, :]
-            sigma = logits[:, int(feature_size/2):, :, :] + eps
-        else:
-            raise Exception("unknown number of dims for isotropic gauss reparam")
+        # Compute feature size and do some sanity checks
+        feature_size = logits.shape[dim2slice]
+        assert feature_size % 2 == 0, "feature dimension not divisible by 2 for mu/sigma^2."
+        assert feature_size // 2 == self.output_size, \
+            "feature_size = {} but requested output_size = {}".format(feature_size, self.output_size)
 
+        # Slice the first chunk for the mean and the second for the var
+        mu = torch.narrow(logits, dim2slice, 0, feature_size // 2)
+        sigma = torch.narrow(logits, dim2slice, feature_size // 2, feature_size // 2)
+        sigma = sigma.add_(eps_fn(self.config['half']))  # Numerical tolerance for variance
+        # TODO: consider these variance thresholding functions:
+        # sigma = F.softplus(sigma) + eps
+        # sigma = F.hardtanh(sigma, min_val=-6.,max_val=2.)
+
+        # Handle the reparameterization.
         return self._reparametrize_gaussian(mu, sigma, force=force)
 
     def get_reparameterizer_scalars(self):
@@ -154,9 +153,9 @@ class IsotropicGaussian(nn.Module):
 
         """
         z_given_x = D.Normal(params['gaussian']['mu'],
-                          params['gaussian']['logvar'])
+                             params['gaussian']['logvar'])
         z_given_xhat = D.Normal(params['q_z_given_xhat']['gaussian']['mu'],
-                           params['q_z_given_xhat']['gaussian']['logvar'])
+                                params['q_z_given_xhat']['gaussian']['logvar'])
         kl_proxy_to_xent = torch.sum(D.kl_divergence(z_given_x, z_given_xhat), dim=-1)
         return self.config['continuous_mut_info'] * kl_proxy_to_xent
 
@@ -183,7 +182,7 @@ class IsotropicGaussian(nn.Module):
         :rtype: torch.Tensor
 
         """
-        if prior == None: # use default prior
+        if prior is None:  # use default prior
             return IsotropicGaussian._kld_gaussian_N_0_1(
                 dist_a['gaussian']['mu'], dist_a['gaussian']['logvar']
             )
@@ -217,4 +216,4 @@ class IsotropicGaussian(nn.Module):
         z, gauss_params = self.reparmeterize(logits, force=force)
         gauss_params['mu_mean'] = torch.mean(gauss_params['mu'])
         gauss_params['logvar_mean'] = torch.mean(gauss_params['logvar'])
-        return z, { 'z': z, 'logits': logits, 'gaussian':  gauss_params }
+        return z, {'z': z, 'logits': logits, 'gaussian':  gauss_params}

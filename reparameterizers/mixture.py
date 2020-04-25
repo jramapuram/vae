@@ -1,14 +1,9 @@
 from __future__ import print_function
-import pprint
-import copy
 import warnings
 import torch
-import numpy as np
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.autograd import Variable
 
-from helpers.utils import float_type, ones_like, nan_check_and_break
+from helpers.utils import nan_check_and_break
 from .beta import Beta
 from .gumbel import GumbelSoftmax
 from .isotropic_gaussian import IsotropicGaussian
@@ -16,19 +11,20 @@ from .isotropic_gaussian import IsotropicGaussian
 
 class Mixture(nn.Module):
     ''' continuous + discrete reparaterization '''
-    def __init__(self, num_discrete, num_continuous, config, is_beta=False):
+    def __init__(self, config, is_beta=False):
         super(Mixture, self).__init__()
         warnings.warn("\n\nMixture is depricated, use concat_reparam or sequential_reparam.\n")
         self.config = config
         self.is_beta = is_beta
-        self.num_discrete_input = num_discrete
-        self.num_continuous_input = num_continuous
+        self.is_discrete = True
+        self.num_discrete_input = self.config['discrete_size']
+        self.num_continuous_input = self.config['continuous_size']
 
         # setup the continuous & discrete reparameterizer
         self.continuous = IsotropicGaussian(config) if not is_beta else Beta(config)
         self.discrete = GumbelSoftmax(config)
 
-        self.input_size = num_continuous + num_discrete
+        self.input_size = self.num_continuous + self.num_discrete
         self.output_size = self.discrete.output_size + self.continuous.output_size
 
     def get_reparameterizer_scalars(self):

@@ -1,11 +1,12 @@
 from __future__ import print_function
 
 import torch
+from copy import deepcopy
 
 from .simple_vae import SimpleVAE
-from helpers.utils import nan_check_and_break, zeros, same_type, is_half
-from helpers.distributions import nll as nll_fn
-from helpers.layers import get_decoder, get_encoder, str_to_activ_module
+import helpers.utils as utils
+import helpers.layers as layers
+import helpers.distributions as distributions
 
 
 class VAENoKL(SimpleVAE):
@@ -18,8 +19,8 @@ class VAENoKL(SimpleVAE):
         :rtype: dict
 
         """
-        nll = nll_fn(x, recon_x, self.config['nll_type'])
-        nan_check_and_break(nll, "nll")
+        nll = distributions.nll(x, recon_x, self.config['nll_type'])
+        utils.nan_check_and_break(nll, "nll")
         return {
             'loss': nll,
             'loss_mean': torch.mean(nll),
@@ -30,51 +31,18 @@ class VAENoKL(SimpleVAE):
             'mut_info_mean': torch.mean(torch.zeros_like(nll)),
         }
 
+
 class Autoencoder(SimpleVAE):
-    def reparameterize(self, logits):
-        """ Reparameterize the logits and returns a dict.
+    def reparameterize(self, logits, force=False):
+        """ No reparameterization for autoencoders.
 
         :param logits: unactivated encoded logits.
+        :param force: unused, kept for API reasons.
         :returns: reparam dict
         :rtype: dict
 
         """
         return logits, {}
-
-
-    def build_encoder(self):
-        """ helper to build the encoder type
-
-        :returns: an encoder
-        :rtype: nn.Module
-
-        """
-        conv_layer_types = ['conv', 'coordconv', 'resnet']
-        input_shape = [self.input_shape[0], 0, 0] if self.config['encoder_layer_type'] \
-            in conv_layer_types else self.input_shape
-
-        # return the encoder
-        return get_encoder(self.config)(input_shape=input_shape,
-                                        output_size=self.config['latent_size'],
-                                        activation_fn=self.activation_fn)
-
-    def build_decoder(self, reupsample=True):
-        """ helper function to build convolutional or dense decoder
-
-        :returns: a decoder
-        :rtype: nn.Module
-
-        """
-        if self.config['decoder_layer_type'] == "pixelcnn":
-            assert self.config['nll_type'] == "disc_mix_logistic" \
-                or self.config['nll_type'] == "log_logistic_256", \
-                "pixelcnn only works with disc_mix_logistic or log_logistic_256"
-
-        decoder = get_decoder(self.config, reupsample)(input_size=self.config['latent_size'],
-                                                       output_shape=self.input_shape,
-                                                       activation_fn=self.activation_fn)
-        # append the variance as necessary
-        return self._append_variance_projection(decoder)
 
     def generate_synthetic_samples(self, batch_size, **kwargs):
         """ Generates samples with VAE.
@@ -84,21 +52,41 @@ class Autoencoder(SimpleVAE):
         :rtype: torch.Tensor
 
         """
-        # return zeros([batch_size] + self.input_shape, cuda=self.config['cuda'])
-        z_mu = self.aggregate_posterior.ema_val
-        z_logvar = same_type(is_half(z_mu), z_mu.is_cuda)(
-            z_mu.size()
-        ).normal_()
-        z_samples = z_mu + z_logvar
-        if self.config['decoder_layer_type'] == "pixelcnn":
-            # decode the synthetic samples through the base decoder
-            decoded = self.decoder(z_samples)
-            return self.generate_pixel_cnn(batch_size, decoded)
-
-        # in the normal case just decode and activate
+        z_samples = utils.same_type(self.config['half'], self.config['cuda'])(
+            batch_size, self.config['continuous_size']
+        ).normal_(mean=0.0, std=1.0)
         return self.nll_activation(self.decode(z_samples))
 
-    def loss_function(self, recon_x, x, reparam_map):
+    def build_encoder(self):
+        """ helper to build the encoder type
+
+        :returns: an encoder
+        :rtype: nn.Module
+
+        """
+        return layers.get_encoder(**self.config)(
+            output_size=self.config['continuous_size']
+        )
+
+    def build_decoder(self, reupsample=True):
+        """ helper function to build convolutional or dense decoder
+
+        :returns: a decoder
+        :rtype: nn.Module
+
+        """
+        dec_conf = deepcopy(self.config)
+        if dec_conf['nll_type'] == 'pixel_wise':
+            dec_conf['input_shape'][0] *= 256
+
+        decoder = layers.get_decoder(output_shape=dec_conf['input_shape'], **dec_conf)(
+            input_size=self.config['continuous_size']
+        )
+
+        # append the variance as necessary
+        return self._append_variance_projection(decoder)
+
+    def loss_function(self, recon_x, x, reparam_map, **unused_kwargs):
         """ Autoencoder is simple the NLL term in the VAE.
 
         :param recon_x: the unactivated reconstruction preds.
@@ -107,8 +95,8 @@ class Autoencoder(SimpleVAE):
         :rtype: dict
 
         """
-        nll = nll_fn(x, recon_x, self.config['nll_type'])
-        nan_check_and_break(nll, "nll")
+        nll = distributions.nll(x, recon_x, self.config['nll_type'])
+        utils.nan_check_and_break(nll, "nll")
         return {
             'loss': nll,
             'loss_mean': torch.mean(nll),
