@@ -29,7 +29,7 @@ class AdditiveVRNN(VRNN):
                 decode_activated_t = nll_activation_fn(decode_t, self.config['nll_type'])
                 input_t = decode_activated_t if i == 0 else decode_activated_t + input_t
 
-            if self.training and i == 0:
+            if i == 0:  # TODO: only use the hidden state from t=0?
                 self.aggregate_posterior['rnn_hidden_state_h'](self.memory.get_state()[0])
                 self.aggregate_posterior['rnn_hidden_state_c'](self.memory.get_state()[1])
 

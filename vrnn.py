@@ -464,7 +464,7 @@ class VRNN(AbstractVAE):
                 decode_t, params_t = self.step(input_t)
                 input_t = nll_activation_fn(decode_t, self.config['nll_type'])
 
-            if self.training and i == 0:
+            if i == 0:  # TODO: only use the hidden state from t=0?
                 self.aggregate_posterior['rnn_hidden_state_h'](self.memory.get_state()[0])
                 self.aggregate_posterior['rnn_hidden_state_c'](self.memory.get_state()[1])
 
@@ -687,9 +687,8 @@ class VRNN(AbstractVAE):
 
         """
         logits_map = self.encode(*x_args)
-        if self.training:
-            self.aggregate_posterior['encoder_logits'](logits_map['encoder_logits'])
-            self.aggregate_posterior['prior_logits'](logits_map['prior_logits'])
+        self.aggregate_posterior['encoder_logits'](logits_map['encoder_logits'])
+        self.aggregate_posterior['prior_logits'](logits_map['prior_logits'])
 
         return self.reparameterize(logits_map)
 

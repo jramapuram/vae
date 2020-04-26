@@ -76,12 +76,12 @@ class AbstractVAE(nn.Module):
         """Helper to build a KL annealer (if requred in argparse)."""
         kl_annealer = None
         if self.config['kl_annealing_cycles'] is not None:
-            ten_percent_of_epochs_as_steps = int(self.config['epochs'] * 0.1) * self.config['steps_per_epoch']
-            total_cycles = self.config['total_steps'] / self.config['kl_annealing_cycles']
-            print("steps_per_epoch = {} | total_steps = {} | total_cycles = {} | 10% steps = {}".format(
-                self.config['steps_per_epoch'],
-                self.config['total_steps'],
-                total_cycles, ten_percent_of_epochs_as_steps))
+            ten_percent_of_epochs_as_steps = int(self.config['epochs'] * 0.1) * self.config['steps_per_train_epoch']
+            total_cycles = self.config['total_train_steps'] / self.config['kl_annealing_cycles']
+            # print("steps_per_epoch = {} | total_steps = {} | total_cycles = {} | 10% steps = {}".format(
+            #     self.config['steps_per_epoch'],
+            #     self.config['total_steps'],
+            #     total_cycles, ten_percent_of_epochs_as_steps))
             # Linear warmup with fixed rate; generally performs worse than cosine-annealing below.
             # self.kl_annealer = layers.LinearWarmupWithFixedInterval(
             #     fixed_steps=int(np.ceil((total_cycles + 1) * 0.3)),  # Use 90% for base kl-beta
@@ -90,9 +90,10 @@ class AbstractVAE(nn.Module):
             kl_annealer = layers.LinearWarmupWithCosineAnnealing(
                 decay_steps=int(total_cycles * 0.9),                        # Use 90% for cos-anneal.
                 warmup_steps=int(total_cycles * 0.1),                       # Use 10% for linear warmup.
-                total_steps=self.config['total_steps'],                     # Total steps for model.
+                total_steps=self.config['total_train_steps'],                     # Total steps for model.
                 constant_for_last_k_steps=ten_percent_of_epochs_as_steps    # Constant steps at end.
             )
+            print("\nKL-Annealer: {}\n".format(kl_annealer))
 
         return kl_annealer
 
