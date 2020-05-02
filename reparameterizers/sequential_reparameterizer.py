@@ -94,8 +94,8 @@ class SequentialReparameterizer(nn.Module):
         :rtype: torch.Tensor
 
         """
-        mi = None
-        for param, reparam in zip(dists, self.reparameterizers):
+        dist_params, mi = dists['concat'], None
+        for param, reparam in zip(dist_params, self.reparameterizers):
             reparam_obj = reparam[-1] if isinstance(reparam, nn.Sequential) else reparam
             mi = reparam_obj.mutual_info(param) if mi is None else mi + reparam_obj.mutual_info(param)
 
@@ -110,11 +110,12 @@ class SequentialReparameterizer(nn.Module):
         :rtype: torch.Tensor
 
         """
-        priors = [None for _ in range(len(dists))] if priors is None else priors
-        assert len(priors) == len(dists)
+        dist_params = dists['sequential']
+        priors = [None for _ in range(len(dist_params))] if priors is None else priors
+        assert len(priors) == len(dist_params)
 
         kl = None
-        for param, prior, reparam in zip(dists, priors, self.reparameterizers):
+        for param, prior, reparam in zip(dist_params, priors, self.reparameterizers):
             reparam_obj = reparam[-1] if isinstance(reparam, nn.Sequential) else reparam
             kl = reparam_obj.kl(param, prior) if kl is None else kl + reparam_obj.kl(param, prior)
 
@@ -129,6 +130,7 @@ class SequentialReparameterizer(nn.Module):
 
         """
         assert force is False, "force not implemented for sequential reparameterizer"
+        original_logits = logits
 
         # Do the first reparam separately because it doesnt have a dense layer
         logits, params = self.reparameterizers[0](logits, force=force)
@@ -143,7 +145,7 @@ class SequentialReparameterizer(nn.Module):
 
             params_list.append({**params, 'logits': logits})
 
-        return logits, params_list
+        return logits, {'logits': original_logits, 'sequential': params_list}
 
     def prior(self, batch_size, **kwargs):
         """ Gen the first prior.

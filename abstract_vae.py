@@ -75,7 +75,8 @@ class AbstractVAE(nn.Module):
     def build_kl_annealer(self):
         """Helper to build a KL annealer (if requred in argparse)."""
         kl_annealer = None
-        if self.config['kl_annealing_cycles'] is not None:
+        klc = self.config['kl_annealing_cycles']
+        if klc is not None and klc > 0:
             ten_percent_of_epochs_as_steps = int(self.config['epochs'] * 0.1) * self.config['steps_per_train_epoch']
             total_cycles = self.config['total_train_steps'] / self.config['kl_annealing_cycles']
             # print("steps_per_epoch = {} | total_steps = {} | total_cycles = {} | 10% steps = {}".format(
@@ -350,10 +351,6 @@ class AbstractVAE(nn.Module):
         kld = self.kld(params)
         elbo = nll + kld  # save the base ELBO, but use the beta-vae elbo for the full loss
 
-        # sanity checks
-        utils.nan_check_and_break(nll, "nll")
-        utils.nan_check_and_break(kld, "kld")
-
         # add the proxy loss if it exists
         proxy_loss = self.reparameterizer.proxy_layer.loss_function() \
             if hasattr(self.reparameterizer, 'proxy_layer') else torch.zeros_like(elbo)
@@ -361,8 +358,16 @@ class AbstractVAE(nn.Module):
         # handle the mutual information term
         mut_info = self.mut_info(params, x.size(0))
 
-        # compute full loss to use for optimization
+        # get the kl-beta from the annealer or just set to fixed value
         kl_beta = self.compute_kl_beta()
+
+        # sanity checks only dont in fp32 due to too much fp16 magic
+        if not self.config['half']:
+            utils.nan_check_and_break(nll, "nll")
+            if kl_beta > 0:  # only check if we have a KLD
+                utils.nan_check_and_break(kld, "kld")
+
+        # compute full loss to use for optimization
         loss = (nll + kl_beta * kld) - mut_info
         return {
             'loss': loss,

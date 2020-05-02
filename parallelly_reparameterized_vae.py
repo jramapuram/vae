@@ -2,11 +2,10 @@ from __future__ import print_function
 
 from .abstract_vae import AbstractVAE
 from .reparameterizers.concat_reparameterizer import ConcatReparameterizer
-from .reparameterizers import GumbelSoftmax, Mixture
 
 
 class ParallellyReparameterizedVAE(AbstractVAE):
-    def __init__(self, input_shape, reparameterizer_strs=["discrete", "isotropic_gaussian"], **kwargs):
+    def __init__(self, input_shape, reparameterizer_strs=["bernoulli", "isotropic_gaussian"], **kwargs):
         """ Implements a parallel (in the case of mixture-reparam) VAE
 
         :param input_shape: the input shape

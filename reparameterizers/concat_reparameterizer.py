@@ -62,8 +62,8 @@ class ConcatReparameterizer(nn.Module):
         :rtype: torch.Tensor
 
         """
-        mi = None
-        for param, reparam in zip(dists, self.reparameterizers):
+        dist_params, mi = dists['concat'], None
+        for param, reparam in zip(dist_params, self.reparameterizers):
             mi = reparam.mutual_info(param) if mi is None else mi + reparam.mutual_info(param)
 
         return mi
@@ -71,17 +71,18 @@ class ConcatReparameterizer(nn.Module):
     def kl(self, dists, priors=None):
         """ concatenates all the KLs together and returns
 
-        :param dists: a list of distribution params
+        :param dists: a dict containing distribution params (see return from forward).
         :param priors: a list (or None) of priors, used only in VRNN currently
         :returns: kl-divergence of shape [batch_size]
         :rtype: torch.Tensor
 
         """
-        priors = [None for _ in range(len(dists))] if priors is None else priors
-        assert len(priors) == len(dists)
+        dist_params = dists['concat']
+        priors = [None for _ in range(len(dist_params))] if priors is None else priors
+        assert len(priors) == len(dist_params)
 
         kl = None
-        for param, prior, reparam in zip(dists, priors, self.reparameterizers):
+        for param, prior, reparam in zip(dist_params, priors, self.reparameterizers):
             kl = reparam.kl(param, prior) if kl is None else kl + reparam.kl(param, prior)
 
         return kl
@@ -90,8 +91,8 @@ class ConcatReparameterizer(nn.Module):
         """ execute the reparameterization layer-by-layer returning ALL params and last reparam logits.
 
         :param logits: the input logits
-        :returns: concat reparam, list of params
-        :rtype: torch.Tensor, list
+        :returns: concat reparam, dict with full logits and list of params
+        :rtype: torch.Tensor, dict(torch.Tensor, list)
 
         """
         params_list = []
@@ -114,7 +115,7 @@ class ConcatReparameterizer(nn.Module):
             reparameterized.append(reparameterized_i.clone())
             params_list.append({**params, 'logits': logits[:, begin:end]})
 
-        return torch.cat(reparameterized, -1), params_list
+        return torch.cat(reparameterized, -1), {'logits': logits, 'concat': params_list}
 
     def prior(self, batch_size, **kwargs):
         """ Gen the first prior.

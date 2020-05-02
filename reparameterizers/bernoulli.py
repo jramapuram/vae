@@ -27,7 +27,8 @@ class Bernoulli(nn.Module):
         :rtype: dict
 
         """
-        uniform_probs = same_type(self.config['half'], self.config['cuda'])(1, self.output_size).zero_()
+        uniform_probs = same_type(self.config['half'], self.config['cuda'])(
+            batch_size, self.output_size).zero_()
         uniform_probs += 0.5
         return {
             'discrete': {
