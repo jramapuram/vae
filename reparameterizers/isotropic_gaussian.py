@@ -3,10 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributions as D
-from torch.autograd import Variable
 
 from helpers.utils import zeros_like, ones_like, same_type, \
-    nan_check_and_break, is_half
+    nan_check_and_break
 from helpers.utils import eps as eps_fn
 
 
@@ -71,11 +70,9 @@ class IsotropicGaussian(nn.Module):
 
         """
         scale_var = 1.0 if 'scale_var' not in kwargs else kwargs['scale_var']
-        return Variable(
-            same_type(self.config['half'], self.config['cuda'])(
-                batch_size, self.output_size
-            ).normal_(mean=0, std=scale_var)
-        )
+        return same_type(self.config['half'], self.config['cuda'])(
+            batch_size, self.output_size
+        ).normal_(mean=0, std=scale_var)
 
     def _reparametrize_gaussian(self, mu, logvar, force=False):
         """ Internal member to reparametrize gaussian.
@@ -87,12 +84,11 @@ class IsotropicGaussian(nn.Module):
 
         """
         if self.training or force:  # returns a stochastic sample for training
-            std = logvar.mul(0.5).exp()
-            eps = same_type(is_half(logvar), logvar.is_cuda)(
-                logvar.size()
-            ).normal_()
-            eps = Variable(eps)
-            nan_check_and_break(logvar, "logvar")
+            std = logvar.mul(0.5)  # Usually has .exp(), but overflows fp16
+            eps = torch.zeros_like(logvar).normal_().type(std.dtype)
+            if not self.config['half']:  # sanity check while not fp16
+                nan_check_and_break(logvar, "logvar")
+
             reparam_sample = eps.mul(std).add_(mu)
             return reparam_sample, {'z': reparam_sample, 'mu': mu, 'logvar': logvar}
             # return D.Normal(mu, logvar).rsample(), {'mu': mu, 'logvar': logvar}
@@ -143,11 +139,11 @@ class IsotropicGaussian(nn.Module):
         """
         return {}
 
-    def mutual_info(self, params, eps=1e-9):
+    def mutual_info(self, params, eps=None):
         """ I(z_d; x) ~ H(z_prior, z_d) + H(z_prior)
 
         :param params: parameters of distribution
-        :param eps: tolerance
+        :param eps: tolerance; not needed for this distribution.
         :returns: batch_size mutual information (prop-to) tensor.
         :rtype: torch.Tensor
 
@@ -171,7 +167,7 @@ class IsotropicGaussian(nn.Module):
         """
         standard_normal = D.Normal(zeros_like(mu), ones_like(logvar))
         normal = D.Normal(mu, logvar)
-        return torch.sum(D.kl_divergence(normal, standard_normal), -1)
+        return torch.sum(D.kl_divergence(normal, standard_normal).type(mu.dtype), -1)
 
     def kl(self, dist_a, prior=None):
         """ KL divergence of dist_a against a prior, if none then N(0, 1)
@@ -191,7 +187,7 @@ class IsotropicGaussian(nn.Module):
         return torch.sum(D.kl_divergence(
             D.Normal(dist_a['gaussian']['mu'], dist_a['gaussian']['logvar']),
             D.Normal(prior['gaussian']['mu'], prior['gaussian']['logvar'])
-        ), -1)
+        ).type(dist_a['gaussian']['mu'].dtype), -1)
 
     def log_likelihood(self, z, params):
         """ Log-likelihood of z induced under params.
