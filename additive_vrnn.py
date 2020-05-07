@@ -7,7 +7,7 @@ from helpers.distributions import nll_activation as nll_activation_fn
 
 
 class AdditiveVRNN(VRNN):
-    def forward(self, input_t):
+    def forward(self, input_t, **unused_kwargs):
         """ Multi-step forward pass for AdditiveVRNN.
 
         :param input_t: input tensor or list of tensors

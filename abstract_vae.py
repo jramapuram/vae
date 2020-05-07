@@ -251,23 +251,25 @@ class AbstractVAE(nn.Module):
                                             self.config['nll_type'],
                                             chans=self.chans)
 
-    def forward(self, x):
-        """ Accepts input, gets posterior and latent and decodes.
+    def forward(self, x, labels=None):
+        """Accepts input (and optionally labels), gets posterior and latent and decodes.
 
         :param x: input tensor.
+        :param labels: (optional) labels
         :returns: decoded logits and reparam dict
         :rtype: torch.Tensor, dict
 
         """
-        z, params = self.posterior(x)
-        decoded_logits = self.decode(z, x=x)
+        z, params = self.posterior(x, labels=labels)
+        decoded_logits = self.decode(z)
         params = self._compute_mi_params(decoded_logits, params)
         return decoded_logits, params
 
-    def importance_weighted_elbo_analytic(self, x, K=5000):
+    def importance_weighted_elbo_analytic(self, x, labels=None, K=5000):
         """ ELBO using importance samples.
 
         :param x: input data.
+        :param labels: (optional) labels
         :param K: number of importance samples.
         :returns: negative ELBO
         :rtype: float32
@@ -276,7 +278,7 @@ class AbstractVAE(nn.Module):
         elbo_mu = torch.zeros(x.shape[0], device=x.device)
 
         for _ in range(K):
-            z, params = self.posterior(x, force=True)
+            z, params = self.posterior(x, labels=labels, force=True)
             decoded_logits, params = self.decode(z)
             loss_t = self.loss_function(decoded_logits, x, params)
             elbo_mu += loss_t['elbo']
@@ -284,10 +286,11 @@ class AbstractVAE(nn.Module):
         # log-sum exp and return
         return torch.logsumexp(elbo_mu / K, dim=0)
 
-    def importance_weighted_elbo_monte_carlo(self, x, K=500):
+    def importance_weighted_elbo_monte_carlo(self, x, labels=None, K=500):
         """ ELBO using importance samples.
 
         :param x: input data.
+        :param labels: (optional) labels.
         :param K: number of importance samples.
         :returns: negative ELBO
         :rtype: float32
@@ -297,8 +300,8 @@ class AbstractVAE(nn.Module):
         from tqdm import tqdm
 
         for _ in tqdm(range(K)):
-            z, params = self.posterior(x, force=True)
-            decoded_logits = self.decode(z, x=x)
+            z, params = self.posterior(x, labels=labels, force=True)
+            decoded_logits = self.decode(z)
 
             # grab log likelihood of posterior and prior over z
             log_q_z_given_x = self.reparameterizer.log_likelihood(z, params)
@@ -342,7 +345,9 @@ class AbstractVAE(nn.Module):
         # multiple monte-carlo samples for the decoder.
         if self.training:
             for k in range(1, K):
-                z_k, params_k = self.reparameterize(params['logits'])
+
+                z_k, params_k = self.reparameterize(logits=params['logits'],
+                                                    labels=params.get('labels', None))
                 recon_x_i = self.decode(z_k)
                 nll = nll + distributions.nll(x, recon_x_i, self.config['nll_type'])
 
@@ -391,10 +396,11 @@ class AbstractVAE(nn.Module):
         """
         return self.reparameterizer.is_discrete
 
-    def reparameterize(self, logits, force=False):
+    def reparameterize(self, logits, labels=None, force=False):
         """ Reparameterize the logits and returns a dict.
 
         :param logits: unactivated encoded logits.
+        :param labels: (optional) labels
         :param force: force reparameterize the distributions
         :returns: reparam dict
         :rtype: dict
@@ -402,7 +408,7 @@ class AbstractVAE(nn.Module):
         """
         return self.reparameterizer(logits, force=force)
 
-    def decode(self, z, x=None):
+    def decode(self, z):
         """ Decode a latent z back to x.
 
         :param z: the latent tensor.
@@ -413,10 +419,11 @@ class AbstractVAE(nn.Module):
         decoded_logits = self.decoder(z.contiguous())
         return decoded_logits
 
-    def posterior(self, x, force=False):
+    def posterior(self, x, labels=None, force=False):
         """ get a reparameterized Q(z|x) for a given x
 
         :param x: input tensor
+        :param labels: (optional) labels
         :param force:  force reparameterization
         :returns: reparam dict
         :rtype: torch.Tensor
@@ -424,7 +431,7 @@ class AbstractVAE(nn.Module):
         """
         z_logits = self.encode(x)                          # encode logits
         self.aggregate_posterior(z_logits)                 # aggregate posterior EMA
-        return self.reparameterize(z_logits, force=force)  # return reparameterized value
+        return self.reparameterize(z_logits, labels=labels, force=force)  # return reparameterized value
 
     def encode(self, x):
         """ Encodes a tensor x to a set of logits.

@@ -6,7 +6,7 @@ from .abstract_vae import AbstractVAE
 
 class SimpleVAE(AbstractVAE):
     def __init__(self, input_shape, **kwargs):
-        """ Implements a parallel (in the case of mixture-reparam) VAE
+        """ Implements a standard simple VAE.
 
         :param input_shape: the input shape
         :returns: an object of AbstractVAE
