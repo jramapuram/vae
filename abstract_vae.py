@@ -108,7 +108,7 @@ class AbstractVAE(nn.Module):
         encoder = layers.get_encoder(**self.config)(
             output_size=self.reparameterizer.input_size
         )
-        print('\nencoder has {} parameters\n'.format(utils.number_of_parameters(encoder) / 1e6))
+        print('encoder has {} parameters\n'.format(utils.number_of_parameters(encoder) / 1e6))
         return encoder
 
     def build_decoder(self, reupsample=True):
@@ -125,7 +125,7 @@ class AbstractVAE(nn.Module):
         decoder = layers.get_decoder(output_shape=dec_conf['input_shape'], **dec_conf)(
             input_size=self.reparameterizer.output_size
         )
-        print('\ndecoder has {} parameters\n'.format(utils.number_of_parameters(decoder) / 1e6))
+        print('decoder has {} parameters\n'.format(utils.number_of_parameters(decoder) / 1e6))
 
         # append the variance as necessary
         return self._append_variance_projection(decoder)
