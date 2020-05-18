@@ -35,6 +35,9 @@ class VarianceProjector(nn.Module):
                 # Expand the scalar variance to a matrix diagonal covariance and broadcast to 3 channels.
                 covariance = torch.eye(x.shape[-2], x.shape[-1], device=x.device) * self.variance_scalar
                 return torch.cat([x, covariance.expand_as(x)], 1)
+            elif x.dim() == 2:
+                # [B, F], expand to F
+                return torch.cat([x, self.variance_scalar.expand_as(x)], 1)
 
             raise Exception("unknown dims for Variance projector")
 
@@ -185,7 +188,7 @@ class AbstractVAE(nn.Module):
             z_samples = self.reparameterize_aggregate_posterior()
         else:
             z_samples = self.reparameterizer.prior(
-                    batch_size, scale_var=self.config['generative_scale_var'], **kwargs
+                batch_size, scale_var=self.config['generative_scale_var'], **kwargs
             )
 
         # in the normal case just decode and activate

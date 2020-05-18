@@ -86,7 +86,7 @@ class Autoencoder(SimpleVAE):
         # append the variance as necessary
         return self._append_variance_projection(decoder)
 
-    def loss_function(self, recon_x, x, reparam_map, **unused_kwargs):
+    def loss_function(self, recon_x, x, **unused_kwargs):
         """ Autoencoder is simple the NLL term in the VAE.
 
         :param recon_x: the unactivated reconstruction preds.
@@ -99,10 +99,12 @@ class Autoencoder(SimpleVAE):
         utils.nan_check_and_break(nll, "nll")
         return {
             'loss': nll,
+            'elbo': torch.zeros_like(nll),
             'loss_mean': torch.mean(nll),
-            'elbo_mean': torch.mean(torch.zeros_like(nll)),
+            'elbo_mean': 0,
             'nll_mean': torch.mean(nll),
-            'kld_mean': torch.mean(torch.zeros_like(nll)),
-            'proxy_mean': torch.mean(torch.zeros_like(nll)),
-            'mut_info_mean': torch.mean(torch.zeros_like(nll)),
+            'kld_mean': 0,
+            'kl_beta_scalar': 0,
+            'proxy_mean': 0,
+            'mut_info_mean': 0,
         }
