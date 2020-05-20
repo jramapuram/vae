@@ -322,18 +322,18 @@ class AbstractVAE(nn.Module):
         # log-sum exp and return
         return torch.logsumexp(elbo_mu / K, dim=0)
 
-    def compute_kl_beta(self):
+    def compute_kl_beta(self, kl_beta_list):
         """Compute the KL-beta term using an annealer or just returns.
 
+        :param kl_beta_list: a list of kl-beta values to scale
         :returns: scalar float32
         :rtype: float32
 
         """
-        kl_beta = self.config['kl_beta']
         if self.kl_annealer is not None:
-            kl_beta = self.kl_annealer(self.config['kl_beta'])
+            kl_beta_list = self.kl_annealer(kl_beta_list)
 
-        return kl_beta
+        return kl_beta_list
 
     def loss_function(self, recon_x, x, params, K=1):
         """ Produces ELBO, handles mutual info and proxy loss terms too.
@@ -370,7 +370,7 @@ class AbstractVAE(nn.Module):
         mut_info = self.mut_info(params, x.size(0))
 
         # get the kl-beta from the annealer or just set to fixed value
-        kl_beta = self.compute_kl_beta()
+        kl_beta = self.compute_kl_beta(self.config['kl_beta'])[0]  # 0 because it converts to a list
 
         # sanity checks only dont in fp32 due to too much fp16 magic
         if not self.config['half']:
