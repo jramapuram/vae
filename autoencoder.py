@@ -33,11 +33,12 @@ class VAENoKL(SimpleVAE):
 
 
 class Autoencoder(SimpleVAE):
-    def reparameterize(self, logits, force=False):
-        """ No reparameterization for autoencoders.
+    def reparameterize(self, logits, labels=None, force=False):
+        """Autoencoders don't reparameterize.
 
         :param logits: unactivated encoded logits.
-        :param force: unused, kept for API reasons.
+        :param labels: (optional) labels, NOT USED.
+        :param force: force reparameterize the distributions
         :returns: reparam dict
         :rtype: dict
 
