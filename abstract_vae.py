@@ -351,7 +351,6 @@ class AbstractVAE(nn.Module):
         # multiple monte-carlo samples for the decoder.
         if self.training:
             for k in range(1, K):
-
                 z_k, params_k = self.reparameterize(logits=params['logits'],
                                                     labels=params.get('labels', None))
                 recon_x_i = self.decode(z_k)
