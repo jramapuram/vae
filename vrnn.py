@@ -801,27 +801,28 @@ class VRNN(AbstractVAE):
 
         return loss_aggregate_map
 
-    def loss_function(self, recon_x_container, x_container, params_map, K=1):
+    def loss_function(self, recon_x, x, params, K=1):
         """ evaluates the loss of the model by simply summing individual losses
 
-        :param recon_x_container: the reconstruction container
-        :param x_container: the input container
-        :param params_map: the params dict
+        :param recon_x: the reconstruction container
+        :param x: the input container
+        :param params: the params dict
         :param K: number of monte-carlo samples to use.
         :returns: the mean-reduced aggregate dict
         :rtype: dict
 
         """
-        assert len(recon_x_container) == len(params_map)
+        assert len(recon_x) == len(params)
+        assert K == 1, "Monte carlo sampling for decoding not implemented for VRNN"
 
         # case where only 1 data sample, but many posteriors
-        if not isinstance(x_container, list) and len(x_container) != len(recon_x_container):
-            x_container = [x_container.clone() for _ in range(len(recon_x_container))]
+        if not isinstance(x, list) and len(x) != len(recon_x):
+            x = [x.clone() for _ in range(len(recon_x))]
 
         # aggregate the loss many and return the mean of the map
         loss_aggregate_map = None
-        for recon_x, x, params in zip(recon_x_container, x_container, params_map):
-            loss_t = super(VRNN, self).loss_function(recon_x, x, params, K=K)
+        for recon_x, x, p in zip(recon_x, x, params):
+            loss_t = super(VRNN, self).loss_function(recon_x, x, p, K=K)
             loss_aggregate_map = self._add_loss_map(loss_t, loss_aggregate_map)
 
         return self._mean_map(loss_aggregate_map)

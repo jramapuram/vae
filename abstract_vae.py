@@ -369,7 +369,7 @@ class AbstractVAE(nn.Module):
         mut_info = self.mut_info(params, x.size(0))
 
         # get the kl-beta from the annealer or just set to fixed value
-        kl_beta = self.compute_kl_beta(self.config['kl_beta'])
+        kl_beta = self.compute_kl_beta([self.config['kl_beta']])[0]
 
         # sanity checks only dont in fp32 due to too much fp16 magic
         if not self.config['half']:

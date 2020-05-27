@@ -97,7 +97,9 @@ class Autoencoder(SimpleVAE):
 
         """
         nll = distributions.nll(x, recon_x, self.config['nll_type'])
-        utils.nan_check_and_break(nll, "nll")
+        if not self.config['half']:
+            utils.nan_check_and_break(nll, "nll")
+
         return {
             'loss': nll,
             'elbo': torch.zeros_like(nll),
