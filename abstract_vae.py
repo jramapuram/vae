@@ -112,7 +112,7 @@ class AbstractVAE(nn.Module):
             output_size=self.reparameterizer.input_size
         )
         print('encoder has {} parameters\n'.format(utils.number_of_parameters(encoder) / 1e6))
-        return encoder
+        return torch.jit.script(encoder) if self.config['jit'] else encoder
 
     def build_decoder(self, reupsample=True):
         """ helper function to build convolutional or dense decoder
@@ -131,7 +131,8 @@ class AbstractVAE(nn.Module):
         print('decoder has {} parameters\n'.format(utils.number_of_parameters(decoder) / 1e6))
 
         # append the variance as necessary
-        return self._append_variance_projection(decoder)
+        decoder = self._append_variance_projection(decoder)
+        return torch.jit.script(decoder) if self.config['jit'] else decoder
 
     def _append_variance_projection(self, decoder):
         """ Appends a decoder variance for gaussian, etc.

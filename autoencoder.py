@@ -65,9 +65,10 @@ class Autoencoder(SimpleVAE):
         :rtype: nn.Module
 
         """
-        return layers.get_encoder(**self.config)(
+        encoder = layers.get_encoder(**self.config)(
             output_size=self.config['continuous_size']
         )
+        return torch.jit.script(encoder) if self.config['jit'] else encoder
 
     def build_decoder(self, reupsample=True):
         """ helper function to build convolutional or dense decoder
@@ -85,7 +86,8 @@ class Autoencoder(SimpleVAE):
         )
 
         # append the variance as necessary
-        return self._append_variance_projection(decoder)
+        decoder = self._append_variance_projection(decoder)
+        return torch.jit.script(decoder) if self.config['jit'] else decoder
 
     def loss_function(self, recon_x, x, **unused_kwargs):
         """ Autoencoder is simple the NLL term in the VAE.
