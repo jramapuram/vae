@@ -122,7 +122,7 @@ class IsotropicGaussian(nn.Module):
         # Slice the first chunk for the mean and the second for the var
         mu = torch.narrow(logits, dim2slice, 0, feature_size // 2)
         sigma = torch.narrow(logits, dim2slice, feature_size // 2, feature_size // 2)
-        sigma = sigma.add_(eps_fn(self.config['half']))  # Numerical tolerance for variance
+        sigma = sigma + eps_fn(self.config['half'])  # Numerical tolerance for variance
         # TODO: consider these variance thresholding functions:
         # sigma = F.softplus(sigma) + eps
         # sigma = F.hardtanh(sigma, min_val=-6.,max_val=2.)
