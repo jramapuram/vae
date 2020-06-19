@@ -235,11 +235,12 @@ class VRNN(AbstractVAE):
         self.reparameterizer = get_reparameterizer(self.config['reparam_type'])(self.config)
 
         # keep track of ammortized posterior
+
         self.aggregate_posterior = nn.ModuleDict({
-            'encoder_logits': EMA(0.999),
-            'prior_logits': EMA(0.999),
-            'rnn_hidden_state_h': EMA(0.999),
-            'rnn_hidden_state_c': EMA(0.999)
+            'encoder_logits': EMA(self.config['aggregate_posterior_ema_decay']),
+            'prior_logits': EMA(self.config['aggregate_posterior_ema_decay']),
+            'rnn_hidden_state_h': EMA(self.config['aggregate_posterior_ema_decay']),
+            'rnn_hidden_state_c': EMA(self.config['aggregate_posterior_ema_decay'])
         })
 
         # build the entire model
@@ -628,7 +629,7 @@ class VRNN(AbstractVAE):
         :rtype: (torch.Tensor, torch.Tensor)
 
         """
-        if 'use_aggregate_posterior' in kwargs and kwargs['use_aggregate_posterior']:
+        if kwargs.get('use_aggregate_posterior', False):
             final_state = torch.mean(self.aggregate_posterior['rnn_hidden_state_h'].ema_val, 0)
             self.memory.state = (self.aggregate_posterior['rnn_hidden_state_h'].ema_val,
                                  self.aggregate_posterior['rnn_hidden_state_c'].ema_val)

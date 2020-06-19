@@ -60,8 +60,7 @@ class AbstractVAE(nn.Module):
         self.config = kwargs['kwargs']
 
         # keep track of ammortized posterior
-        self.aggregate_posterior = layers.EMA(0.9)
-        self.polyak_ema = layers.EMA(self.config['polyak_ema']) if self.config['polyak_ema'] > 0 else None
+        self.aggregate_posterior = layers.EMA(self.config['aggregate_posterior_ema_decay'])
 
         # Setup the cyclic annealing object if required.
         self.kl_annealer = self.build_kl_annealer()
@@ -173,7 +172,9 @@ class AbstractVAE(nn.Module):
         """
         training_tmp = self.reparameterizer.training
         self.reparameterizer.train(True)
-        z_samples, _ = self.reparameterize(self.aggregate_posterior.ema_val)
+        enumerated_labels = torch.arange(
+                self.config['output_size'], device='cuda:0' if self.config['cuda'] else 'cpu')
+        z_samples, _ = self.reparameterize(self.aggregate_posterior.ema_val, labels=enumerated_labels)
         self.reparameterizer.train(training_tmp)
         return z_samples
 
@@ -185,7 +186,7 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor
 
         """
-        if 'use_aggregate_posterior' in kwargs and kwargs['use_aggregate_posterior']:
+        if kwargs.get('use_aggregate_posterior', False):
             z_samples = self.reparameterize_aggregate_posterior()
         else:
             z_samples = self.reparameterizer.prior(
