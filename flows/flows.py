@@ -10,6 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import helpers.layers as layers
+
 
 def get_mask(in_features, out_features, in_flow_features, mask_type=None):
     """
@@ -70,15 +72,13 @@ class MADESplit(nn.Module):
 
         self.pre_exp_tanh = pre_exp_tanh
 
-        activations = {'relu': nn.ReLU, 'sigmoid': nn.Sigmoid, 'tanh': nn.Tanh}
-
         input_mask = get_mask(num_inputs, num_hidden, num_inputs,
                               mask_type='input')
         hidden_mask = get_mask(num_hidden, num_hidden, num_inputs)
         output_mask = get_mask(num_hidden, num_inputs, num_inputs,
                                mask_type='output')
 
-        act_func = activations[s_act]
+        act_func = layers.str_to_activ_module(s_act)
         self.s_joiner = MaskedLinear(num_inputs, num_hidden, input_mask,
                                      num_cond_inputs)
 
@@ -88,7 +88,7 @@ class MADESplit(nn.Module):
                                      MaskedLinear(num_hidden, num_inputs,
                                                   output_mask))
 
-        act_func = activations[t_act]
+        act_func = layers.str_to_activ_module(t_act)
         self.t_joiner = MaskedLinear(num_inputs, num_hidden, input_mask,
                                      num_cond_inputs)
 
@@ -141,9 +141,7 @@ class MADE(nn.Module):
                  act='relu',
                  pre_exp_tanh=False):
         super(MADE, self).__init__()
-
-        activations = {'relu': nn.ReLU, 'sigmoid': nn.Sigmoid, 'tanh': nn.Tanh}
-        act_func = activations[act]
+        act_func = layers.str_to_activ_module(act)
 
         input_mask = get_mask(
             num_inputs, num_hidden, num_inputs, mask_type='input')
@@ -416,9 +414,8 @@ class CouplingLayer(nn.Module):
         self.num_inputs = num_inputs
         self.mask = mask
 
-        activations = {'relu': nn.ReLU, 'sigmoid': nn.Sigmoid, 'tanh': nn.Tanh}
-        s_act_func = activations[s_act]
-        t_act_func = activations[t_act]
+        s_act_func = layers.str_to_activ_module(s_act)
+        t_act_func = layers.str_to_activ_module(t_act)
 
         if num_cond_inputs is not None:
             total_inputs = num_inputs + num_cond_inputs

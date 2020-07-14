@@ -116,8 +116,10 @@ class Beta(nn.Module):
         :rtype: torch.Tensor
 
         """
-        prior = D.Beta(zeros_like(conc1) + 1/3,
-                       zeros_like(conc2) + 1/3)
+        # prior = D.Beta(zeros_like(conc1) + 1/3,
+        #                zeros_like(conc2) + 1/3)
+        prior = D.Beta(zeros_like(conc1) + 1.1,
+                       zeros_like(conc2) + 1.1)
         beta = D.Beta(conc1, conc2)
         return torch.sum(D.kl_divergence(beta, prior), -1)
 
