@@ -513,3 +513,56 @@ def build_maf_flow(num_inputs, num_hidden, num_cond_inputs=None,
         ]
 
     return FlowSequential(*modules)
+
+
+def build_maf_split_flow(num_inputs, num_hidden, num_cond_inputs=None,
+                         num_blocks=5, s_activation_str='tanh',
+                         t_activation_str='relu'):
+    """Simple helper to build num_blocks of a maf-split based flow."""
+    modules = []
+    for _ in range(num_blocks):
+        modules += [
+            MADESplit(num_inputs, num_hidden, num_cond_inputs,
+                      s_act=s_activation_str, t_act=t_activation_str),
+            BatchNormFlow(num_inputs),
+            Reverse(num_inputs)
+        ]
+
+    return FlowSequential(*modules)
+
+
+def build_maf_split_glow_flow(num_inputs, num_hidden, num_cond_inputs=None,
+                              num_blocks=5, s_activation_str='tanh',
+                              t_activation_str='relu'):
+    """Simple helper to build num_blocks of a maf-split-glow (w/invertible MM) based flow."""
+    modules = []
+    for _ in range(num_blocks):
+        modules += [
+            MADESplit(num_inputs, num_hidden, num_cond_inputs,
+                      s_act=s_activation_str, t_act=t_activation_str),
+            BatchNormFlow(num_inputs),
+            InvertibleMM(num_inputs)
+        ]
+
+    return FlowSequential(*modules)
+
+
+def build_realnvp_flow(num_inputs, num_hidden, num_cond_inputs=None,
+                       num_blocks=5, s_activation_str='tanh',
+                       t_activation_str='relu', cuda=False):
+    """Simple helper to build num_blocks of a realNVP based flow."""
+    modules = []
+
+    device = torch.device("cuda:0" if cuda else "cpu")
+    mask = torch.arange(0, num_inputs) % 2
+    mask = mask.to(device).float()
+
+    for _ in range(num_blocks):
+        modules += [
+            CouplingLayer(num_inputs, num_hidden, mask, num_cond_inputs,
+                          s_act=s_activation_str, t_act=t_activation_str),
+            BatchNormFlow(num_inputs)
+        ]
+        mask = 1 - mask
+
+    return FlowSequential(*modules)
