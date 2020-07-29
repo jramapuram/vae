@@ -490,7 +490,7 @@ class AbstractVAE(nn.Module):
         :rtype: dict
 
         """
-        if self.config['continuous_mut_info'] > 0 or self.config['discrete_mut_info'] > 0:
+        if self.config.get('continuous_mut_info', 0) > 0 or self.config.get('discrete_mut_info', 0) > 0:
             _, q_z_given_xhat_params = self.posterior(self.nll_activation(recon_x_logits))
             return {**params, 'q_z_given_xhat': q_z_given_xhat_params}
 
@@ -508,7 +508,7 @@ class AbstractVAE(nn.Module):
         mut_info = utils.same_type(self.config['half'], self.config['cuda'])(batch_size).zero_()
 
         # only grab the mut-info if the scalars above are set
-        if self.config['continuous_mut_info'] > 0 or self.config['discrete_mut_info'] > 0:
+        if self.config.get('continuous_mut_info', 0) > 0 or self.config.get('discrete_mut_info', 0) > 0:
             mut_info = self._clamp_mut_info(self.reparameterizer.mutual_info(dist_params))
 
         return mut_info
