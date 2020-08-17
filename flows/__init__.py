@@ -33,6 +33,18 @@ def get_mask(in_features, out_features, in_flow_features, mask_type=None):
     return (out_degrees.unsqueeze(-1) >= in_degrees.unsqueeze(0)).float()
 
 
+def get_layer_fn(modifier_str):
+    """Simple helper to get the modified layer."""
+    layer_dict = {
+        'none': nn.Linear,
+        'gated': layers.GatedDense,
+        'sine': layers.SineLinear,
+        'spectralnorm': layers.SNLinear,
+    }
+    assert modifier_str in layer_dict, "unknown layer type {}".format(modifier_str)
+    return layer_dict[modifier_str]
+
+
 class MaskedLinear(nn.Module):
     def __init__(self,
                  in_features,
@@ -406,8 +418,10 @@ class AdditiveCouplingLayer(nn.Module):
                  num_inputs,
                  num_hidden,
                  mask,
+                 num_cond_inputs=None,
                  act='relu',
-                 num_cond_inputs=None):
+                 normalization_str='batchnorm',
+                 layer_modifier='none'):
         super(AdditiveCouplingLayer, self).__init__()
 
         self.num_inputs = num_inputs
@@ -420,13 +434,16 @@ class AdditiveCouplingLayer(nn.Module):
         else:
             total_inputs = num_inputs
 
+        # Grab the type of linear layer
+        layer_fn = get_layer_fn(layer_modifier)
+
         self.net = nn.Sequential(
-            layers.BasicDenseBlock(total_inputs, num_hidden, layer_fn=nn.Linear,
-                                   normalization_str='batchnorm', activation_str=act),
+            layers.BasicDenseBlock(total_inputs, num_hidden, layer_fn=layer_fn,
+                                   normalization_str=normalization_str, activation_str=act),
             act_func(),
             # nn.Linear(total_inputs, num_hidden), act_func(),
-            layers.BasicDenseBlock(num_hidden, num_hidden, layer_fn=nn.Linear,
-                                   normalization_str='batchnorm', activation_str=act),
+            layers.BasicDenseBlock(num_hidden, num_hidden, layer_fn=layer_fn,
+                                   normalization_str=normalization_str, activation_str=act),
             act_func(),
             # nn.Linear(num_hidden, num_hidden), act_func(),
             nn.Linear(num_hidden, num_inputs))
@@ -457,7 +474,9 @@ class CouplingLayer(nn.Module):
                  mask,
                  num_cond_inputs=None,
                  s_act='tanh',
-                 t_act='relu'):
+                 t_act='relu',
+                 normalization_str='batchnorm',
+                 layer_modifier='none'):
         super(CouplingLayer, self).__init__()
 
         self.num_inputs = num_inputs
@@ -471,23 +490,26 @@ class CouplingLayer(nn.Module):
         else:
             total_inputs = num_inputs
 
+        # Grab the type of linear layer
+        layer_fn = get_layer_fn(layer_modifier)
+
         self.scale_net = nn.Sequential(
-            layers.BasicDenseBlock(total_inputs, num_hidden, layer_fn=nn.Linear,
-                                   normalization_str='batchnorm', activation_str=s_act),
+            layers.BasicDenseBlock(total_inputs, num_hidden, layer_fn=layer_fn,
+                                   normalization_str=normalization_str, activation_str=s_act),
             s_act_func(),
             # nn.Linear(total_inputs, num_hidden), s_act_func(),
-            layers.BasicDenseBlock(num_hidden, num_hidden, layer_fn=nn.Linear,
-                                   normalization_str='batchnorm', activation_str=s_act),
+            layers.BasicDenseBlock(num_hidden, num_hidden, layer_fn=layer_fn,
+                                   normalization_str=normalization_str, activation_str=s_act),
             s_act_func(),
             # nn.Linear(num_hidden, num_hidden), s_act_func(),
             nn.Linear(num_hidden, num_inputs))
         self.translate_net = nn.Sequential(
-            layers.BasicDenseBlock(total_inputs, num_hidden, layer_fn=nn.Linear,
-                                   normalization_str='batchnorm', activation_str=t_act),
+            layers.BasicDenseBlock(total_inputs, num_hidden, layer_fn=layer_fn,
+                                   normalization_str=normalization_str, activation_str=t_act),
             t_act_func(),
             # nn.Linear(total_inputs, num_hidden), t_act_func(),
-            layers.BasicDenseBlock(num_hidden, num_hidden, layer_fn=nn.Linear,
-                                   normalization_str='batchnorm', activation_str=t_act),
+            layers.BasicDenseBlock(num_hidden, num_hidden, layer_fn=layer_fn,
+                                   normalization_str=normalization_str, activation_str=t_act),
             t_act_func(),
             # nn.Linear(num_hidden, num_hidden), t_act_func(),
             nn.Linear(num_hidden, num_inputs))
@@ -605,7 +627,8 @@ def build_maf_split_glow_flow(num_inputs, num_hidden, num_cond_inputs=None,
 
 def build_realnvp_flow(num_inputs, num_hidden, num_cond_inputs=None,
                        num_blocks=5, s_activation_str='tanh',
-                       t_activation_str='relu', cuda=False):
+                       t_activation_str='relu', normalization_str='batchnorm',
+                       cuda=False):
     """Simple helper to build num_blocks of a realNVP based flow."""
     modules = []
 
@@ -616,7 +639,8 @@ def build_realnvp_flow(num_inputs, num_hidden, num_cond_inputs=None,
     for _ in range(num_blocks):
         modules += [
             CouplingLayer(num_inputs, num_hidden, mask, num_cond_inputs,
-                          s_act=s_activation_str, t_act=t_activation_str),
+                          s_act=s_activation_str, t_act=t_activation_str,
+                          normalization_str=normalization_str),
             BatchNormFlow(num_inputs)
         ]
         mask = 1 - mask
@@ -625,7 +649,9 @@ def build_realnvp_flow(num_inputs, num_hidden, num_cond_inputs=None,
 
 
 def build_glow_flow(num_inputs, num_hidden, num_cond_inputs=None,
-                    num_blocks=5, activation_str='relu', cuda=False):
+                    num_blocks=5, activation_str='relu',
+                    normalization_str='batchnorm', layer_modifier='none',
+                    cuda=False):
     modules = []
 
     device = torch.device("cuda:0" if cuda else "cpu")
@@ -637,9 +663,10 @@ def build_glow_flow(num_inputs, num_hidden, num_cond_inputs=None,
             ActNorm(num_inputs),
             InvertibleMM(num_inputs),
             AdditiveCouplingLayer(num_inputs, num_hidden, mask,
-                                  act=activation_str, num_cond_inputs=num_cond_inputs)
-            # CouplingLayer(num_inputs, num_hidden, mask, num_cond_inputs,
-            #               s_act=s_activation_str, t_act=t_activation_str)
+                                  act=activation_str,
+                                  num_cond_inputs=num_cond_inputs,
+                                  normalization_str=normalization_str,
+                                  layer_modifier=layer_modifier)
         ]
         mask = 1 - mask
 
