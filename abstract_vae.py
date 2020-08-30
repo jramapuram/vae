@@ -317,7 +317,7 @@ class AbstractVAE(nn.Module):
             log_p_z = self.reparameterizer.log_likelihood(z, prior_params)
 
             # compute the NLL and the log_q_z_given_x - log_p_z
-            nll = distributions.nll(x, decoded_logits, self.config['nll_type'])
+            nll = self.nll(x, decoded_logits, self.config['nll_type'])
             kl_z = torch.sum(log_q_z_given_x - log_p_z, -1)
             elbo_mu += nll - kl_z
 
@@ -348,7 +348,7 @@ class AbstractVAE(nn.Module):
         :rtype: dict
 
         """
-        nll = distributions.nll(x, recon_x, self.config['nll_type'])
+        nll = self.nll(x, recon_x, self.config['nll_type'])
 
         # multiple monte-carlo samples for the decoder.
         if self.training:
@@ -356,7 +356,7 @@ class AbstractVAE(nn.Module):
                 z_k, params_k = self.reparameterize(logits=params['logits'],
                                                     labels=params.get('labels', None))
                 recon_x_i = self.decode(z_k)
-                nll = nll + distributions.nll(x, recon_x_i, self.config['nll_type'])
+                nll = nll + self.nll(x, recon_x_i, self.config['nll_type'])
 
             nll = nll / K
 
@@ -463,6 +463,18 @@ class AbstractVAE(nn.Module):
 
         """
         return self.reparameterizer.kl(dist_a)
+
+    def nll(self, x, recon_x, nll_type):
+        """ Grab the negative log-likelihood for a specific NLL type
+
+        :param x: the true tensor
+        :param recon_x: the reconstruction tensor
+        :param nll_type: the NLL type (str)
+        :returns: [B] dimensional tensor
+        :rtype: torch.Tensor
+
+        """
+        return distributions.nll(x, recon_x, nll_type)
 
     def _clamp_mut_info(self, mut_info):
         """ helper to clamp the mutual information according to a predefined strategy
