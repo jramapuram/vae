@@ -337,13 +337,14 @@ class AbstractVAE(nn.Module):
 
         return kl_beta_list
 
-    def loss_function(self, recon_x, x, params, K=1):
+    def loss_function(self, recon_x, x, params, K=1, **extra_loss_terms):
         """ Produces ELBO, handles mutual info and proxy loss terms too.
 
         :param recon_x: the unactivated reconstruction preds.
         :param x: input tensor.
         :param params: the dict of reparameterization.
         :param K: number of monte-carlo samples to use.
+        :param extra_loss_terms: kwargs of extra [B] dimensional losses
         :returns: loss dict
         :rtype: dict
 
@@ -379,8 +380,13 @@ class AbstractVAE(nn.Module):
             if kl_beta > 0:  # only check if we have a KLD
                 utils.nan_check_and_break(kld, "kld")
 
+        # if we are provided additional losses add them together
+        additional_losses = torch.sum(
+            torch.cat([v.unsqueeze(0) for v in extra_loss_terms.values()], 0), 0) \
+            if extra_loss_terms else 0
+
         # compute full loss to use for optimization
-        loss = (nll + kl_beta * kld) - mut_info
+        loss = (nll + additional_losses + kl_beta * kld) - mut_info
         return {
             'loss': loss,
             'elbo': elbo,
