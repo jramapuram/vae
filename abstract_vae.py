@@ -31,15 +31,7 @@ class VarianceProjector(nn.Module):
 
     def forward(self, x):
         if hasattr(self, 'variance_scalar'):
-            if x.dim() == 4:
-                # Expand the scalar variance to a matrix diagonal covariance and broadcast to 3 channels.
-                covariance = torch.eye(x.shape[-2], x.shape[-1], device=x.device) * self.variance_scalar
-                return torch.cat([x, covariance.expand_as(x)], 1)
-            elif x.dim() == 2:
-                # [B, F], expand to F
-                return torch.cat([x, self.variance_scalar.expand_as(x)], 1)
-
-            raise Exception("unknown dims for Variance projector")
+            return torch.cat([x, self.variance_scalar.expand_as(x)], 1)
 
         return x
 
