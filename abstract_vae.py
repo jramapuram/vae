@@ -330,7 +330,7 @@ class AbstractVAE(nn.Module):
         return kl_beta_list
 
     def loss_function(self, recon_x, x, params, K=1, **extra_loss_terms):
-        """ Produces ELBO, handles mutual info and proxy loss terms too.
+        """ Produces ELBO.
 
         :param recon_x: the unactivated reconstruction preds.
         :param x: input tensor.
@@ -355,10 +355,6 @@ class AbstractVAE(nn.Module):
 
         kld = self.kld(params)
         elbo = nll + kld  # save the base ELBO, but use the beta-vae elbo for the full loss
-
-        # add the proxy loss if it exists
-        proxy_loss = self.reparameterizer.proxy_layer.loss_function() \
-            if hasattr(self.reparameterizer, 'proxy_layer') else torch.zeros_like(elbo)
 
         # handle the mutual information term
         mut_info = self.mut_info(params, x.size(0))
@@ -386,8 +382,8 @@ class AbstractVAE(nn.Module):
             'elbo_mean': torch.mean(elbo),
             'nll_mean': torch.mean(nll),
             'kld_mean': torch.mean(kld),
+            'additional_loss_mean': torch.mean(additional_losses),
             'kl_beta_scalar': kl_beta,
-            'proxy_mean': torch.mean(proxy_loss),
             'mut_info_mean': torch.mean(mut_info)
         }
 

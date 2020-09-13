@@ -6,8 +6,11 @@ from .isotropic_gaussian import IsotropicGaussian
 from .concat_reparameterizer import ConcatReparameterizer
 from .sequential_reparameterizer import SequentialReparameterizer
 
+from .flow import FlowReparameterizer
+
 
 reparam_dict = {
+    'flow': FlowReparameterizer,
     'beta': Beta,
     'bernoulli': Bernoulli,
     'discrete': GumbelSoftmax,
