@@ -371,7 +371,7 @@ class AbstractVAE(nn.Module):
         # if we are provided additional losses add them together
         additional_losses = torch.sum(
             torch.cat([v.unsqueeze(0) for v in extra_loss_terms.values()], 0), 0) \
-            if extra_loss_terms else 0
+            if extra_loss_terms else torch.zeros_like(nll)
 
         # compute full loss to use for optimization
         loss = (nll + additional_losses + kl_beta * kld) - mut_info
