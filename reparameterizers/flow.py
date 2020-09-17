@@ -78,8 +78,15 @@ class FlowReparameterizer(nn.Module):
         return torch.mean(-nll - logdet, -1)
 
     def forward(self, logits, force=False):
-        batch_size, num_reads, input_size = logits.shape
-        flow, logdet = self.flow(logits.contiguous().view(-1, input_size))
-        flow = flow.view([-1, num_reads, input_size])
-        logdet = logdet.view([-1, num_reads])
+        if logits.dim() == 3:
+            batch_size, num_reads, input_size = logits.shape
+            flow, logdet = self.flow(logits.contiguous().view(-1, input_size))
+            flow = flow.view([-1, num_reads, input_size])
+            logdet = logdet.view([-1, num_reads])
+        elif logits.dim() == 2:
+            batch_size, input_size = logits.shape
+            flow, logdet = self.flow(logits.contiguous().view(-1, input_size))
+            flow = flow.view([-1, input_size])
+            # logdet = logdet.view([-1])
+
         return flow, {'recon_x': flow, 'logdet': logdet}
