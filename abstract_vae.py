@@ -1,4 +1,5 @@
 from __future__ import print_function
+import tree
 import numpy as np
 import torch
 import torch.nn as nn
@@ -178,15 +179,27 @@ class AbstractVAE(nn.Module):
         :rtype: torch.Tensor
 
         """
-        if kwargs.get('use_aggregate_posterior', False):
-            z_samples = self.reparameterize_aggregate_posterior()
-        else:
-            z_samples = self.reparameterizer.prior(
-                batch_size, scale_var=self.config['generative_scale_var'], **kwargs
-            )
+        def generate_single_batch(batch_size):
+            if kwargs.get('use_aggregate_posterior', False):
+                z_samples = self.reparameterize_aggregate_posterior()
+            else:
+                z_samples = self.reparameterizer.prior(
+                    batch_size, scale_var=self.config['generative_scale_var'], **kwargs
+                )
 
-        # in the normal case just decode and activate
-        return self.nll_activation(self.decode(z_samples))
+            # in the normal case just decode and activate
+            return self.nll_activation(self.decode(z_samples))
+
+        full_generations, num_generated = [], 0
+        def detach_to_cpu(t): return t.detach().cpu()  # move the tensor to cpu memory
+        while num_generated < batch_size:
+            gen = tree.map_structure(
+                detach_to_cpu, generate_single_batch(self.config['batch_size']))
+            full_generations.append(gen)
+            num_generated += gen.shape[0]  # add number generated
+
+        def reduce_to_requested(t): return t[-batch_size:]
+        return tree.map_structure(reduce_to_requested, full_generations)
 
     def generate_synthetic_sequential_samples(self, num_original_discrete, num_rows=8):
         """ Iterates over all discrete positions and generates samples (for mix or disc only).
@@ -265,56 +278,43 @@ class AbstractVAE(nn.Module):
         params = self._compute_mi_params(decoded_logits, params)
         return decoded_logits, params
 
-    def importance_weighted_elbo_analytic(self, x, labels=None, K=5000):
-        """ ELBO using importance samples.
+    def likelihood(self, loader, K=1000):
+        """ Likelihood by integrating ELBO.
+            TODO(jramapuram): move loader out.
 
-        :param x: input data.
-        :param labels: (optional) labels
+        :param loader: the data loader to iterate over.
         :param K: number of importance samples.
-        :returns: negative ELBO
+        :returns: likelihood produced by monte-carlo integration of elbo.
         :rtype: float32
 
         """
-        elbo_mu = torch.zeros(x.shape[0], device=x.device)
+        with torch.no_grad():
+            likelihood = []
 
-        for _ in range(K):
-            z, params = self.posterior(x, labels=labels, force=True)
-            decoded_logits, params = self.decode(z)
-            loss_t = self.loss_function(decoded_logits, x, params)
-            elbo_mu += loss_t['elbo']
+            for num_minibatches, (minibatch, labels) in enumerate(loader):
+                minibatch, labels = [minibatch.cuda() if self.config['cuda'] else minibatch,
+                                     labels.cuda() if self.config['cuda'] else minibatch]
 
-        # log-sum exp and return
-        return torch.logsumexp(elbo_mu / K, dim=0)
+                z_logits = self.encode(minibatch)   # we only need to encode once
+                batch_size = z_logits.shape[0]
 
-    def importance_weighted_elbo_monte_carlo(self, x, labels=None, K=500):
-        """ ELBO using importance samples.
+                for idx in range(batch_size):
+                    z_logits_i = z_logits[idx].expand_as(z_logits).contiguous()
+                    sample_i = minibatch[idx].expand_as(minibatch).contiguous()
+                    label_i = labels[idx].expand_as(labels).contiguous()
 
-        :param x: input data.
-        :param labels: (optional) labels.
-        :param K: number of importance samples.
-        :returns: negative ELBO
-        :rtype: float32
+                    elbo = []
+                    for count in range(K // batch_size):
+                        z, params = self.reparameterize(z_logits_i, labels=label_i)
+                        decoded_logits = self.decode(z)
+                        loss_t = self.loss_function(decoded_logits, sample_i, params=params)
+                        elbo.append(loss_t['elbo'])
 
-        """
-        elbo_mu = torch.zeros(x.shape[0], device=x.device)
-        from tqdm import tqdm
+                    # compute the log-sum-exp of the elbo of the single sample taken over K replications
+                    multi_sample_elbo = torch.cat([e.unsqueeze(0) for e in elbo], 0).view([-1])
+                    likelihood.append(torch.logsumexp(multi_sample_elbo, dim=0) - np.log(count + 1))
 
-        for _ in tqdm(range(K)):
-            z, params = self.posterior(x, labels=labels, force=True)
-            decoded_logits = self.decode(z)
-
-            # grab log likelihood of posterior and prior over z
-            log_q_z_given_x = self.reparameterizer.log_likelihood(z, params)
-            prior_params = self.reparameterizer.prior_params(x.shape[0])
-            log_p_z = self.reparameterizer.log_likelihood(z, prior_params)
-
-            # compute the NLL and the log_q_z_given_x - log_p_z
-            nll = self.nll(x, decoded_logits, self.config['nll_type'])
-            kl_z = torch.sum(log_q_z_given_x - log_p_z, -1)
-            elbo_mu += nll - kl_z
-
-        # log-sum exp and return
-        return torch.logsumexp(elbo_mu / K, dim=0)
+            return torch.mean(torch.cat([l.unsqueeze(0) for l in likelihood], 0))
 
     def compute_kl_beta(self, kl_beta_list):
         """Compute the KL-beta term using an annealer or just returns.
